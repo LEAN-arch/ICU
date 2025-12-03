@@ -1,0 +1,10 @@
+streamlit
+hmmlearn
+fastdtw
+plotly
+scikit-learn
+statsmodels
+pandas
+numpy
+matplotlib
+scipy
