@@ -503,4 +503,56 @@ class App:
                 st.markdown(f"<div class='clinical-hint'><b>Driver:</b> {src}. {reason}.</div>", unsafe_allow_html=True)
             with c2:
                 st.plotly_chart(Viz.spectral(df, ix), use_container_width=True)
-                st.pl
+                st.plotly_chart(Viz.wasserstein(df, ix), use_container_width=True)
+                st.plotly_chart(Viz.adv_forecast(df, ix), use_container_width=True)
+
+        with t_spc:
+            st.plotly_chart(Viz.spc_charts(df, ix), use_container_width=True)
+            c1, c2 = st.columns(2)
+            c1.plotly_chart(Viz.mspc(t2, spe, ix), use_container_width=True)
+            c2.plotly_chart(Viz.adv_control(df, ix), use_container_width=True)
+            
+            c3, c4 = st.columns(2)
+            c3.plotly_chart(Viz.method_comp(df, ix), use_container_width=True)
+            c4.plotly_chart(Viz.cpk_tol(df, ix), use_container_width=True)
+
+# ==========================================
+# 7. ORCHESTRATOR CLASS (LINKER)
+# ==========================================
+class PatientSimulator:
+    def __init__(self, mins=360):
+        self.mins = mins
+        self.t = np.arange(mins)
+        
+    def run(self, case_id, drugs, fluids, bsa, peep, is_paced, vent_mode):
+        cases = {
+            "65M Post-CABG": {'ci':(2.4, 1.8), 'map':(75, 55), 'svri':(2000, 1600), 'hr':(85, 95), 'shunt':0.10, 'copd':1.0, 'vo2_stress': 1.0},
+            "24F Septic Shock": {'ci':(3.5, 5.5), 'map':(65, 45), 'svri':(1200, 500), 'hr':(110, 140), 'shunt':0.15, 'copd':1.0, 'vo2_stress': 1.4},
+            "82M HFpEF Sepsis": {'ci':(2.2, 1.8), 'map':(85, 55), 'svri':(2400, 1800), 'hr':(80, 110), 'shunt':0.20, 'copd':1.5, 'vo2_stress': 1.1},
+            "50M Trauma": {'ci':(3.0, 1.5), 'map':(70, 40), 'svri':(2500, 3200), 'hr':(100, 150), 'shunt':0.05, 'copd':1.0, 'vo2_stress': 0.9}
+        }
+        p = cases[case_id]
+        seed = len(case_id)+42
+        
+        hr, map_r, ci_r, svri_r, rr = Physiology.Autonomic.generate(self.mins, p, is_paced, vent_mode)
+        
+        ppv = (20 if "Trauma" in case_id else 12) + (np.sin(self.t/8)*4)
+        ci_fluid = (fluids/500) * (0.4 if np.mean(ppv)>13 else 0.05)
+        
+        map_f, ci_f, hr_f, svri_f = Physiology.PKPD.apply(map_r, ci_r+ci_fluid, hr, svri_r, drugs, self.mins)
+        pao2, paco2, spo2, vd_vt = Physiology.Respiratory.exchange(drugs['fio2'], rr, p['shunt'], peep, self.mins, p['copd'])
+        hb = 8.0 if "Trauma" in case_id else 12.0
+        do2i, vo2i, o2er, lactate = Physiology.Metabolic.calculate(ci_f, hb, spo2, self.mins, p['vo2_stress'])
+        
+        df = pd.DataFrame({
+            "Time": self.t, "HR": hr_f, "MAP": map_f, "CI": ci_f, "SVRI": svri_f,
+            "CO": ci_f * bsa, "SVR": svri_f / bsa,
+            "Lactate": lactate, "SpO2": spo2, "PaO2": pao2, "PaCO2": paco2, "RR": rr,
+            "DO2I": do2i, "VO2I": vo2i, "O2ER": o2er, "Vd/Vt": vd_vt,
+            "CPO": (map_f * (ci_f * bsa)) / 451
+        }).fillna(0)
+        return df
+
+if __name__ == "__main__":
+    app = App()
+    app.run()
