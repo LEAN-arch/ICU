@@ -207,8 +207,9 @@ class Analytics:
         covs = {"Cardiogenic": [[0.5, -100], [-100, 150000]], "Distributive": [[1.0, -200], [-200, 100000]],
                 "Hypovolemic": [[0.4, -50], [-50, 200000]], "Stable": [[0.6, -150], [-150, 150000]]}
         scores = {}; total = 0
+        x = [row['CI'], row['SVRI']]
         for k, m in means.items():
-            try: scores[k] = multivariate_normal.pdf([row['CI'], row['SVRI']], m, covs[k]); total += scores[k]
+            try: scores[k] = multivariate_normal.pdf(x, m, covs[k]); total += scores[k]
             except: scores[k] = 0
         return {k: (v/total)*100 for k, v in scores.items()} if total > 1e-9 else {k:25.0 for k in means}
 
@@ -329,7 +330,7 @@ class ForecastingEngine:
         return hw
 
 # ==========================================
-# 5. PATIENT SIMULATOR
+# 5. PATIENT SIMULATOR (ORCHESTRATOR)
 # ==========================================
 class PatientSimulator:
     def __init__(self, mins=360):
@@ -385,7 +386,7 @@ class PatientSimulatorL9(PatientSimulator):
         return df
 
 # ==========================================
-# 6. VISUALIZATION LAYER
+# 6. VISUALIZATION LAYER (L9)
 # ==========================================
 class Viz:
     @staticmethod
@@ -405,7 +406,7 @@ class Viz:
     def attractor_3d(df, key):
         r = df.iloc[-60:]
         fig = go.Figure(go.Scatter3d(x=r['CPO'], y=r['SVRI'], z=r['Lactate'], mode='lines+markers', marker=dict(size=3, color=r.index, colorscale='Viridis'), line=dict(width=2)))
-        fig.update_layout(scene=dict(xaxis_title='Power [W]', yaxis_title='SVRI', zaxis_title='Lac'), margin=dict(l=0,r=0,b=0,t=30), height=250, title="3D Trajectory")
+        fig.update_layout(scene=dict(xaxis_title='Power [W]', yaxis_title='SVRI [dyn·s]', zaxis_title='Lac [mM]'), margin=dict(l=0,r=0,b=0,t=30), height=250, title="3D Trajectory")
         return fig
 
     @staticmethod
@@ -446,7 +447,7 @@ class Viz:
     @staticmethod
     def vq_scatter(df, key):
         fig = px.scatter(df.iloc[-60:], x="PaO2", y="SpO2", color="PaCO2", color_continuous_scale="Bluered")
-        fig.update_layout(title="V/Q Status", height=250, margin=dict(l=20,r=20,t=30,b=20))
+        fig.update_layout(title="V/Q Status", height=250, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="PaO2", yaxis_title="SpO2")
         return fig
 
     @staticmethod
@@ -546,7 +547,6 @@ class Viz:
     @staticmethod
     def recurrence_plot(data, key):
         d = data[-60:]; D = np.abs(d[:,None]-d[None,:]); eps=0.1*np.std(d)
-        # Fix: Use 'gray' color scale which is valid in Plotly Express
         fig = px.imshow((D<eps).astype(int), color_continuous_scale='gray', title="Recurrence Plot")
         fig.update_layout(height=250, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="Time i", yaxis_title="Time j")
         return fig
@@ -642,7 +642,7 @@ def main():
             
             e1, e2 = st.columns(2)
             e1.plotly_chart(Viz.recurrence_plot(df['MAP'].values, i), use_container_width=True)
-            e1.markdown("<div class='clinical-hint'><b>Recurrence:</b> Visualizes non-linear stability. Checkered=Stable. Dotty=Chaos.</div>", unsafe_allow_html=True)
+            e1.markdown("<div class='clinical-hint'><b>Recurrence:</b> Visualizes non-linear stability. Periodic=Checkered, Chaotic=No pattern.</div>", unsafe_allow_html=True)
             e2.plotly_chart(Viz.phase_velocity(df, i), use_container_width=True)
             e2.markdown("<div class='clinical-hint'><b>Velocity Phase:</b> Plots Value vs Speed of Change. Spirals indicate loss of autoregulation.</div>", unsafe_allow_html=True)
             
@@ -667,6 +667,12 @@ def main():
              st.markdown("<div class='clinical-hint'><b>SPC:</b> Distinguishes signal from noise. Points outside red lines are significant.</div>", unsafe_allow_html=True)
              st.plotly_chart(Viz.cpk_tol(df, i), use_container_width=True)
              st.markdown("<div class='clinical-hint'><b>Cpk:</b> Process Capability. Is the patient capable of staying within safe MAP limits?</div>", unsafe_allow_html=True)
+             st.plotly_chart(Viz.mspc(t2, spe, i), use_container_width=True)
+             st.markdown("<div class='clinical-hint'><b>Multivariate:</b> T2 detects system shifts. SPE detects model errors.</div>", unsafe_allow_html=True)
+             st.plotly_chart(Viz.adv_control(df, i), use_container_width=True)
+             st.markdown("<div class='clinical-hint'><b>Control:</b> CUSUM/EWMA track small sustained shifts.</div>", unsafe_allow_html=True)
+             st.plotly_chart(Viz.method_comp(df, i), use_container_width=True)
+             st.markdown("<div class='clinical-hint'><b>Validation:</b> Sensor drift analysis.</div>", unsafe_allow_html=True)
 
         with tabs[1]:
             st.plotly_chart(Viz.vq_scatter(df, i), use_container_width=True)
