@@ -4,10 +4,10 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-from scipy.signal import welch, find_peaks
+from scipy.signal import welch
 from scipy.stats import norm, multivariate_normal, wasserstein_distance, linregress, chi2, ks_2samp
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest
 from sklearn.decomposition import PCA
 from sklearn.covariance import LedoitWolf
@@ -17,11 +17,11 @@ from statsmodels.tsa.stattools import grangercausalitytests
 import time
 import warnings
 
-# Suppress statsmodels warnings for cleaner UI
+# Suppress warnings for cleaner UI
 warnings.filterwarnings("ignore")
 
 # ==========================================
-# 1. MASTER CONFIGURATION
+# 1. CONFIGURATION & THEME
 # ==========================================
 st.set_page_config(
     page_title="TITAN | IRIDIUM COMMAND",
@@ -43,12 +43,12 @@ class CONFIG:
     ATM_PRESSURE = 760.0; H2O_PRESSURE = 47.0; R_QUOTIENT = 0.8; MAX_PAO2 = 600.0
     HB_CONVERSION = 1.34; LAC_PROD_THRESH = 330.0; LAC_CLEAR_RATE = 0.05; VCO2_CONST = 130
     
-    # Advanced Physiology (L9)
+    # L9 Advanced Constants
     BARO_SETPOINT = 85.0; COMPARTMENT_K12 = 0.5; COMPARTMENT_K21 = 0.2
     EC50_NOREPI = 0.5; EMAX_NOREPI = 3000.0
     GFR_BASE = 100.0; AUTOREG_LOWER = 60.0; AUTOREG_UPPER = 150.0
     
-    # Drug PK (Potency, Tau, Tolerance)
+    # Drug PK
     DRUG_PK = {
         'norepi': {'svr': 2500.0, 'map': 120.0, 'co': 0.8, 'tau': 2.0, 'tol': 1440.0}, 
         'vaso':   {'svr': 4000.0, 'map': 150.0, 'co': -0.2, 'tau': 5.0, 'tol': 2880.0}, 
@@ -78,7 +78,7 @@ STYLING = f"""
 """
 
 # ==========================================
-# 2. UTILS & ENGINE CORE
+# 2. UTILS
 # ==========================================
 class Utils:
     _rng = np.random.default_rng(42)
@@ -96,16 +96,16 @@ class Utils:
         return B + (noise * volatility)
 
 # ==========================================
-# 3. PHYSIOLOGY ENGINES (L8 & L9)
+# 3. PHYSIOLOGY ENGINES
 # ==========================================
 class Physiology:
-    """Base Physiology Modules (L8)."""
     class Autonomic:
         @staticmethod
         def generate(mins, p, is_paced, vent_mode):
             if is_paced: hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][0], 0.1, 'white')
             elif vent_mode == 'Control (AC)': hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][1], 1.5, 'periodic')
             else: hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][1], 1.5, 'pink')
+            
             map_r = np.maximum(Utils.brownian_bridge(mins, p['map'][0], p['map'][1], 1.2, 'pink'), 20.0)
             ci = np.maximum(Utils.brownian_bridge(mins, p['ci'][0], p['ci'][1], 0.2, 'pink'), 0.5)
             svri = np.maximum(Utils.brownian_bridge(mins, p['svri'][0], p['svri'][1], 100.0, 'pink'), 100.0)
@@ -153,7 +153,7 @@ class Physiology:
             return do2i, vo2i, o2er, lactate
 
 class DeepPhysiology:
-    """Level 9 Advanced Physiology Modules."""
+    """Level 9 Advanced Modules."""
     class Baroreflex:
         @staticmethod
         def compute(map_val):
@@ -161,14 +161,12 @@ class DeepPhysiology:
             hr_reflex = 60 + (60 * symp)
             svr_reflex = 800 + (1500 * symp)
             return hr_reflex, svr_reflex, symp
-
     class Chemoreceptor:
         @staticmethod
         def compute(paco2, pao2):
             drive_co2 = np.maximum(0, paco2 - 45.0) * 2.0
             drive_o2 = 2000 / (pao2 + 0.1) if np.mean(pao2) < 60 else 0
             return np.clip(12 + drive_co2 + (drive_o2 * 0.1), 0, 45)
-
     class Renal:
         @staticmethod
         def compute(map_val, ci):
@@ -177,7 +175,6 @@ class DeepPhysiology:
             return gfr, uo
 
 class AdvancedPKPD:
-    """Level 9 Pharmacometrics."""
     @staticmethod
     def two_compartment(dose_array, mins):
         c1 = np.zeros(mins); c2 = np.zeros(mins); dt=1.0
@@ -186,24 +183,23 @@ class AdvancedPKPD:
             dc2 = (CONFIG.COMPARTMENT_K12*c1[t-1]) - (CONFIG.COMPARTMENT_K21*c2[t-1])
             c1[t] = c1[t-1] + dc1*dt; c2[t] = c2[t-1] + dc2*dt
         return c1, c2
-
     @staticmethod
     def hill_effect(conc, emax, ec50, gamma=1.5):
         return (emax * (conc**gamma)) / (ec50**gamma + conc**gamma)
 
 # ==========================================
-# 4. ANALYTICS, SPC, QA & AI
+# 4. ANALYTICS, SPC, AI
 # ==========================================
 class Analytics:
     @staticmethod
     def signal_forensics(ts, is_paced):
         arr = np.array(ts)
-        if is_paced or np.std(arr) < 0.5: return "EXTERNAL: PACEMAKER", 99, "Zero Variance (Quartz)"
-        if np.max(np.abs(np.gradient(arr))) > 5.0: return "EXTERNAL: INFUSION", 90, "Step Change"
+        if is_paced or np.std(arr) < 0.5: return "EXTERNAL: PACEMAKER", 99, "Zero Variance (Quartz Precision)"
+        if np.max(np.abs(np.gradient(arr))) > 5.0: return "EXTERNAL: INFUSION", 90, "Non-Physiologic Step Change"
         f, Pxx = welch(arr, fs=1/60)
         entropy = -np.sum((Pxx/np.sum(Pxx)) * np.log2((Pxx/np.sum(Pxx)) + 1e-12))
-        if entropy < 1.5: return "EXTERNAL: VENTILATOR", 85, "Periodic Entrainment"
-        return "INTERNAL: AUTONOMIC", 80, "Fractal Pink Noise"
+        if entropy < 1.5: return "EXTERNAL: VENTILATOR", 85, "Periodic Machine Entrainment"
+        return "INTERNAL: AUTONOMIC", 80, "Fractal Bio-Complexity (Pink Noise)"
 
     @staticmethod
     def bayes_shock(row):
@@ -211,8 +207,9 @@ class Analytics:
         covs = {"Cardiogenic": [[0.5, -100], [-100, 150000]], "Distributive": [[1.0, -200], [-200, 100000]],
                 "Hypovolemic": [[0.4, -50], [-50, 200000]], "Stable": [[0.6, -150], [-150, 150000]]}
         scores = {}; total = 0
+        x = [row['CI'], row['SVRI']]
         for k, m in means.items():
-            try: scores[k] = multivariate_normal.pdf([row['CI'], row['SVRI']], m, covs[k]); total += scores[k]
+            try: scores[k] = multivariate_normal.pdf(x, m, covs[k]); total += scores[k]
             except: scores[k] = 0
         return {k: (v/total)*100 for k, v in scores.items()} if total > 1e-9 else {k:25.0 for k in means}
 
@@ -234,19 +231,6 @@ class Analytics:
         vol = max(np.std(hist) if len(hist)>1 else 1.0, 0.5)
         paths = np.array([curr + np.cumsum(np.random.normal(0, vol, 30)) for _ in range(n_sims)])
         return np.percentile(paths, 10, 0), np.percentile(paths, 50, 0), np.percentile(paths, 90, 0)
-
-    @staticmethod
-    def spc_multivariate(df):
-        X = df[['MAP', 'CI', 'SVRI']].to_numpy()
-        try:
-            lw = LedoitWolf().fit(X[:60]) 
-            diff = X - lw.location_
-            t2 = np.sum(np.dot(diff, lw.precision_) * diff, axis=1)
-            pca = PCA(2).fit(StandardScaler().fit_transform(X))
-            X_recon = pca.inverse_transform(pca.transform(StandardScaler().fit_transform(X)))
-            spe = np.sum((StandardScaler().fit_transform(X) - X_recon)**2, axis=1)
-            return t2, spe
-        except: return np.zeros(len(X)), np.zeros(len(X))
     
     @staticmethod
     def inverse_centroids(df):
@@ -258,52 +242,25 @@ class Analytics:
             return [f"C{i+1}: CI={c[0]:.1f}, SVR={c[1]:.0f}" for i,c in enumerate(ctrs)]
         except: return ["Calc Error"]
 
-class DeepAnalytics:
-    """Level 9 Analytics."""
-    @staticmethod
-    def kalman_filter(data):
-        x = np.mean(data); P = 1.0; Q = 1e-5; R = 0.1**2; estimates = []
-        for m in data:
-            x = x + (P+Q)/(P+Q+R)*(m-x); P = (1-(P+Q)/(P+Q+R))*(P+Q)
-            estimates.append(x)
-        return np.array(estimates)
-
-    @staticmethod
-    def granger(df):
-        try:
-            res = grangercausalitytests(df[['MAP', 'Lactate']].diff().dropna(), maxlag=[3], verbose=False)
-            return True, res[3][0]['ssr_ftest'][1]
-        except: return False, 1.0
-
-    @staticmethod
-    def autoencoder(df):
-        X = StandardScaler().fit_transform(df[['MAP', 'CI', 'SVRI', 'HR']].fillna(0))
-        model = MLPRegressor(hidden_layer_sizes=(8, 4, 8), random_state=42, max_iter=200).fit(X, X)
-        return np.mean((X - model.predict(X))**2, axis=1)
-
 class QualityAssurance:
     @staticmethod
     def calculate_cpk(data, usl, lsl):
         mean = np.mean(data); std = np.std(data)
         if std == 0: return 0
         return min((usl - mean) / (3 * std), (mean - lsl) / (3 * std))
-
     @staticmethod
     def get_subgroups(data, size=5):
         n = len(data); n_trim = n - (n % size)
         if n_trim == 0: return data.reshape(1, -1)
         return data[:n_trim].reshape(-1, size)
-
     @staticmethod
     def simulate_noisy_sensor(true_data, bias=5, noise_std=8):
         return true_data + bias + np.random.normal(0, noise_std, len(true_data))
-
     @staticmethod
     def calc_ewma(data, lam=0.2):
         ewma = np.zeros_like(data); ewma[0] = data[0]
         for i in range(1, len(data)): ewma[i] = lam * data[i] + (1 - lam) * ewma[i-1]
         return ewma
-
     @staticmethod
     def calc_cusum(data, k=0.5):
         z = (data - np.mean(data)) / (np.std(data) if np.std(data)>0 else 1)
@@ -311,17 +268,15 @@ class QualityAssurance:
         for i in range(1, len(data)):
             cp[i] = max(0, z[i] - k + cp[i-1]); cm[i] = max(0, -k - z[i] + cm[i-1])
         return cp, cm
-
     @staticmethod
     def check_westgard(data):
         mean, std = np.mean(data), np.std(data)
         if std == 0: return []
         z = (data - mean) / std
         violations = []
-        if len(z)>0 and abs(z[-1]) > 3: violations.append("1-3s (Random)")
-        if len(z)>1 and abs(z[-1]) > 2 and abs(z[-2]) > 2: violations.append("2-2s (Systematic)")
+        if len(z)>0 and abs(z[-1]) > 3: violations.append("1-3s")
+        if len(z)>1 and abs(z[-1]) > 2 and abs(z[-2]) > 2: violations.append("2-2s")
         return violations
-
     @staticmethod
     def mewma(df, lam=0.3):
         X = df[['MAP', 'CI']].values
@@ -334,15 +289,28 @@ class QualityAssurance:
             t2.append(z[i].T @ inv_sigma @ z[i])
         return np.array(t2)
 
-class ForecastingEngine:
+class DeepAnalytics:
     @staticmethod
-    def fit_predict(data, steps=30):
-        try: hw = ExponentialSmoothing(data, trend='add').fit().forecast(steps)
-        except: hw = np.zeros(steps)
-        return hw
+    def kalman_filter(data):
+        x = np.mean(data); P = 1.0; Q = 1e-5; R = 0.1**2; estimates = []
+        for m in data:
+            x = x + (P+Q)/(P+Q+R)*(m-x); P = (1-(P+Q)/(P+Q+R))*(P+Q)
+            estimates.append(x)
+        return np.array(estimates)
+    @staticmethod
+    def granger(df):
+        try:
+            res = grangercausalitytests(df[['MAP', 'Lactate']].diff().dropna(), maxlag=[3], verbose=False)
+            return True, res[3][0]['ssr_ftest'][1]
+        except: return False, 1.0
+    @staticmethod
+    def autoencoder(df):
+        X = StandardScaler().fit_transform(df[['MAP', 'CI', 'SVRI', 'HR']].fillna(0))
+        model = MLPRegressor(hidden_layer_sizes=(8, 4, 8), random_state=42, max_iter=200).fit(X, X)
+        return np.mean((X - model.predict(X))**2, axis=1)
 
 # ==========================================
-# 5. PATIENT SIMULATOR (L9)
+# 5. SIMULATOR ORCHESTRATOR
 # ==========================================
 class PatientSimulator:
     def __init__(self, mins=360):
@@ -360,53 +328,44 @@ class PatientSimulator:
         seed = len(case_id)+42
         Utils.set_seed(seed)
         
-        # Base Sim
         hr, map_r, ci_r, svri_r, rr = Physiology.Autonomic.generate(self.mins, p, is_paced, vent_mode)
         ppv = (20 if "Trauma" in case_id else 12) + (np.sin(self.t/8)*4)
         ci_fluid = (fluids/500) * (0.4 if np.mean(ppv)>13 else 0.05)
+        
         map_f, ci_f, hr_f, svri_f = Physiology.PKPD.apply(map_r, ci_r+ci_fluid, hr, svri_r, drugs, self.mins)
         pao2, paco2, spo2, vd_vt = Physiology.Respiratory.exchange(drugs['fio2'], rr, p['shunt'], peep, self.mins, p['copd'])
         hb = 8.0 if "Trauma" in case_id else 12.0
         do2i, vo2i, o2er, lactate = Physiology.Metabolic.calculate(ci_f, hb, spo2, self.mins, p['vo2_stress'])
         
-        # L9 Deep Overlays
-        # Baroreflex
-        baro_hr, baro_svr, symp = DeepPhysiology.Baroreflex.compute(map_f)
-        hr_final = (hr_f * 0.7) + (baro_hr * 0.3)
-        svri_final = (svri_f * 0.8) + (baro_svr * 0.2)
-        
-        # Chemoreflex
-        resp_drive = DeepPhysiology.Chemoreceptor.compute(paco2, pao2)
-        rr_final = (rr * 0.6) + (resp_drive * 0.4)
-        
-        # Renal
+        df = pd.DataFrame({
+            "Time": self.t, "HR": hr_f, "MAP": map_f, "CI": ci_f, "SVRI": svri_f,
+            "CO": ci_f * bsa, "SVR": svri_f / bsa,
+            "Lactate": lactate, "SpO2": spo2, "PaO2": pao2, "PaCO2": paco2, "RR": rr,
+            "DO2I": do2i, "VO2I": vo2i, "O2ER": o2er, "Vd/Vt": vd_vt,
+            "CPO": (map_f * (ci_f * bsa)) / 451
+        }).fillna(0)
+        return df
+
+class PatientSimulatorL9(PatientSimulator):
+    def run_deep(self, case_id, drugs, fluids, bsa, peep, is_paced, vent_mode):
+        df = self.run(case_id, drugs, fluids, bsa, peep, is_paced, vent_mode)
+        baro_hr, baro_svr, symp = DeepPhysiology.Baroreflex.compute(df['MAP'].values)
+        df['HR'] = (df['HR'] * 0.7) + (baro_hr * 0.3)
+        df['SVRI'] = (df['SVRI'] * 0.8) + (baro_svr * 0.2)
+        df['Symp_Tone'] = symp
         gfr, uo = [], []
-        for m, c in zip(map_f, ci_f):
+        for m, c in zip(df['MAP'], df['CI']):
             g, u = DeepPhysiology.Renal.compute(m, c)
             gfr.append(g); uo.append(u)
-            
-        # Advanced PK
-        c1_ne, c2_ne = AdvancedPKPD.two_compartment(np.full(self.mins, drugs['norepi']), self.mins)
-        
-        # L9 Metrics
-        df = pd.DataFrame({
-            "Time": self.t, "HR": hr_final, "MAP": map_f, "CI": ci_f, "SVRI": svri_final,
-            "CO": ci_f * bsa, "SVR": svri_final / bsa,
-            "Lactate": lactate, "SpO2": spo2, "PaO2": pao2, "PaCO2": paco2, "RR": rr_final,
-            "DO2I": do2i, "VO2I": vo2i, "O2ER": o2er, "Vd/Vt": vd_vt,
-            "CPO": (map_f * (ci_f * bsa)) / 451,
-            "Symp_Tone": symp, "GFR": gfr, "UrineOutput": uo, "Norepi_C1": c1_ne
-        }).fillna(0)
-        
-        # L9 Analytics Columns
+        df['GFR'] = gfr; df['UrineOutput'] = uo
+        c1_ne, _ = AdvancedPKPD.two_compartment(np.full(self.mins, drugs['norepi']), self.mins)
+        df['Norepi_C1'] = c1_ne
         df['MEWMA'] = QualityAssurance.mewma(df)
         df['Recon_Error'] = DeepAnalytics.autoencoder(df)
-        df['MAP_Kalman'] = DeepAnalytics.kalman_filter(df['MAP'].values)
-        
         return df
 
 # ==========================================
-# 6. VISUALIZATION LAYER (L9 ENHANCED)
+# 6. VISUALIZATION LAYER (L9)
 # ==========================================
 class Viz:
     @staticmethod
@@ -426,7 +385,7 @@ class Viz:
     def attractor_3d(df, key):
         r = df.iloc[-60:]
         fig = go.Figure(go.Scatter3d(x=r['CPO'], y=r['SVRI'], z=r['Lactate'], mode='lines+markers', marker=dict(size=3, color=r.index, colorscale='Viridis'), line=dict(width=2)))
-        fig.update_layout(scene=dict(xaxis_title='Power [W]', yaxis_title='SVRI [dyn·s]', zaxis_title='Lac [mM]'), margin=dict(l=0,r=0,b=0,t=30), height=250, title="3D Phase Space Trajectory")
+        fig.update_layout(scene=dict(xaxis_title='Power [W]', yaxis_title='SVRI', zaxis_title='Lac'), margin=dict(l=0,r=0,b=0,t=30), height=250, title="3D Trajectory")
         return fig
 
     @staticmethod
@@ -434,7 +393,7 @@ class Viz:
         hr = np.maximum(df['HR'].iloc[-120:], 1.0); rr = 60000 / hr
         c = CONFIG.COLORS['ext'] if "EXTERNAL" in source else 'teal'
         fig = go.Figure(go.Scatter(x=rr.iloc[:-1], y=rr.iloc[1:], mode='markers', marker=dict(color=c, size=4, opacity=0.6)))
-        fig.update_layout(title=f"Chaos: {source}", height=200, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="RR(n) [ms]", yaxis_title="RR(n+1) [ms]")
+        fig.update_layout(title=f"Chaos: {source}", height=200, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="RR(n)", yaxis_title="RR(n+1)")
         return fig
 
     @staticmethod
@@ -447,12 +406,12 @@ class Viz:
         return fig
 
     @staticmethod
-    def hemo_profile(df, key):
+    def hemodynamic_profile(df, key):
         r = df.iloc[-60:]
         fig = go.Figure()
         fig.add_hline(y=2000, line_dash="dot", annotation_text="Vaso"); fig.add_vline(x=2.2, line_dash="dot", annotation_text="Low Flow")
         fig.add_trace(go.Scatter(x=r['CI'], y=r['SVRI'], mode='markers', marker=dict(color=r.index, colorscale='Viridis'), name="State"))
-        fig.update_layout(title="Pump vs Pipes (Forrester)", height=250, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="CI [L/min/m²]", yaxis_title="SVRI [dyn·s]")
+        fig.update_layout(title="Pump vs Pipes", height=250, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="CI [L/min/m²]", yaxis_title="SVRI [dyn·s]")
         return fig
 
     @staticmethod
@@ -461,13 +420,13 @@ class Viz:
         fig = go.Figure()
         fig.add_shape(type="rect", x0=0, x1=0.6, y0=2, y1=15, fillcolor="rgba(255,0,0,0.1)", line_width=0)
         fig.add_trace(go.Scatter(x=r['CPO'], y=r['Lactate'], mode='lines+markers', marker=dict(color=r.index, colorscale='Bluered'), name="Traj"))
-        fig.update_layout(title="Hemo-Metabolic Coupling", height=250, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="Power [W]", yaxis_title="Lactate [mM]")
+        fig.update_layout(title="Coupling", height=250, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="Power [W]", yaxis_title="Lactate [mM]")
         return fig
 
     @staticmethod
     def vq_scatter(df, key):
         fig = px.scatter(df.iloc[-60:], x="PaO2", y="SpO2", color="PaCO2", color_continuous_scale="Bluered")
-        fig.update_layout(title="V/Q Status", height=250, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="PaO2", yaxis_title="SpO2")
+        fig.update_layout(title="V/Q Status", height=250, margin=dict(l=20,r=20,t=30,b=20))
         return fig
 
     @staticmethod
@@ -485,7 +444,7 @@ class Viz:
     @staticmethod
     def method_comp(df, key):
         true = df['MAP'].iloc[-120:].to_numpy(); noise = QualityAssurance.simulate_noisy_sensor(true)
-        fig = make_subplots(rows=1, cols=2, subplot_titles=("Bland-Altman", "Deming Reg"))
+        fig = make_subplots(rows=1, cols=2, subplot_titles=("Bland-Altman", "Regression"))
         diff = true - noise
         fig.add_trace(go.Scatter(x=(true+noise)/2, y=diff, mode='markers'), row=1, col=1)
         fig.add_hline(y=np.mean(diff)+1.96*np.std(diff), line_dash='dot', line_color='red', row=1, col=1)
@@ -539,12 +498,12 @@ class Viz:
         fig.add_trace(go.Scatter(y=d, line=dict(color='gray'), name="Raw"), row=1, col=1)
         fig.add_trace(go.Scatter(y=ewma, line=dict(color='blue'), name="EWMA"), row=1, col=1)
         fig.add_trace(go.Scatter(y=np.cumsum(d - np.mean(d)), name="CUSUM"), row=1, col=2)
-        fig.update_layout(height=250, margin=dict(l=10,r=10,t=30,b=20), title=f"Adv Control")
+        fig.update_layout(height=250, margin=dict(l=10,r=10,t=30,b=20), title=f"Adv Control ({'Violations!' if violations else 'Stable'})")
         return fig
 
     @staticmethod
     def adv_forecast(df, key):
-        try: hw = ForecastingEngine.fit_predict(df['MAP'].iloc[-60:].to_numpy())
+        try: hw = ExponentialSmoothing(df['MAP'].iloc[-60:], trend='add').fit().forecast(30)
         except: hw = np.zeros(30)
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=np.arange(60), y=df['MAP'].iloc[-60:], name="Hx", line=dict(color='black')))
@@ -557,12 +516,12 @@ class Viz:
         e = df['MAP'].iloc[:60]; l = df['MAP'].iloc[-60:]
         d = wasserstein_distance(e, l)
         fig = go.Figure()
-        fig.add_trace(go.Histogram(x=e, opacity=0.5, name="Baseline"))
-        fig.add_trace(go.Histogram(x=l, opacity=0.5, name="Current"))
+        fig.add_trace(go.Histogram(x=e, opacity=0.5, name="Base"))
+        fig.add_trace(go.Histogram(x=l, opacity=0.5, name="Curr"))
         fig.update_layout(height=200, margin=dict(l=10,r=10,t=30,b=20), title=f"Dist Shift (W={d:.1f})", barmode='overlay')
         return fig
     
-    # --- LEVEL 9 NEW VIZ ---
+    # L9 New Visuals
     @staticmethod
     def recurrence_plot(data, key):
         d = data[-60:]; D = np.abs(d[:,None]-d[None,:]); eps=0.1*np.std(d)
@@ -578,164 +537,119 @@ class Viz:
         return fig
 
 # ==========================================
-# 8. APP ORCHESTRATION
+# 8. MAIN EXECUTION & LAYOUT
 # ==========================================
-class App:
-    def __init__(self):
-        self.sim = None
-        self.df = None
-        self.drugs = {}
-        
-    def run(self):
-        st.markdown(STYLING, unsafe_allow_html=True)
-        if 'events' not in st.session_state: st.session_state['events'] = []
-        if 'fluids' not in st.session_state: st.session_state['fluids'] = 0
-        
-        with st.sidebar:
-            st.title("TITAN | L9")
-            res_mins = st.select_slider("Resolution", [60, 180, 360, 720], value=360)
-            case_id = st.selectbox("Profile", ["65M Post-CABG", "24F Septic Shock", "82M HFpEF Sepsis", "50M Trauma"])
-            
-            c1, c2 = st.columns(2)
-            with c1: h = st.number_input("Ht", 150, 200, 175); norepi = st.number_input("Norepi", 0.0, 2.0, 0.0)
-            with c2: w = st.number_input("Wt", 50, 150, 80); vaso = st.number_input("Vaso", 0.0, 0.1, 0.0)
-            bsa = np.sqrt((h*w)/3600)
-            
-            dobu = st.number_input("Dobutamine", 0.0, 10.0, 0.0); bb = st.number_input("Esmolol", 0.0, 1.0, 0.0)
-            fio2 = st.slider("FiO2", 0.21, 1.0, 0.4); peep = st.slider("PEEP", 0, 20, 5)
-            is_paced = st.checkbox("Pacemaker"); vent_mode = st.selectbox("Vent", ["Spontaneous", "Control (AC)"])
-            
-            if st.button("Bolus 500mL"): st.session_state['fluids'] += 500
-            live = st.checkbox("LIVE")
 
-        self.sim = PatientSimulator(res_mins)
-        self.drugs = {'norepi':norepi, 'vaso':vaso, 'dobu':dobu, 'bb':bb, 'fio2':fio2}
-        
-        df = self.sim.run(case_id, self.drugs, st.session_state['fluids'], bsa, peep, is_paced, vent_mode)
-        
-        sim_b = PatientSimulator(60)
-        base = {'norepi':0, 'vaso':0, 'dobu':0, 'bb':0, 'fio2':0.21}
-        df_b = sim_b.run(case_id, base, 0, bsa, peep, False, 'Spontaneous')
-        
-        df = Analytics.detect_anomalies(df)
-        probs = Analytics.bayes_shock(df.iloc[-1])
-        sugg, conf = Analytics.rl_advisor(df.iloc[-1], self.drugs)
-        p10, p50, p90 = Analytics.monte_carlo_forecast(df)
-        t2, spe = Analytics.spc_multivariate(df)
-        src, _, reason = Analytics.signal_forensics(df['HR'].iloc[-120:], is_paced)
-        centroids = Analytics.inverse_centroids(df)
-        granger, gp = DeepAnalytics.granger(df)
-        
-        if live:
-            holder = st.empty()
-            for i in range(max(10, res_mins-60), res_mins):
-                with holder.container(): self.layout(df.iloc[:i], df_b, probs, sugg, conf, p10, p50, p90, t2[:i], spe[:i], src, reason, centroids, gp, i)
-                time.sleep(0.1)
-        else:
-            self.layout(df, df_b, probs, sugg, conf, p10, p50, p90, t2, spe, src, reason, centroids, gp, len(df))
+if 'events' not in st.session_state: st.session_state['events'] = []
+if 'fluids' not in st.session_state: st.session_state['fluids'] = 0
 
-    def layout(self, df, df_b, probs, sugg, conf, p10, p50, p90, t2, spe, src, reason, centroids, gp, ix):
-        curr = df.iloc[-1]; prev = df.iloc[-60] if len(df)>60 else df.iloc[0]
+def main():
+    # Sidebar Controls
+    with st.sidebar:
+        st.title("TITAN | L9 IRIDIUM")
+        res_mins = st.select_slider("Resolution", [60, 180, 360, 720], value=360)
+        case_id = st.selectbox("Profile", ["65M Post-CABG", "24F Septic Shock", "82M HFpEF Sepsis", "50M Trauma"])
         
+        c1, c2 = st.columns(2)
+        with c1: h = st.number_input("Ht", 150, 200, 175); norepi = st.number_input("Norepi", 0.0, 2.0, 0.0)
+        with c2: w = st.number_input("Wt", 50, 150, 80); vaso = st.number_input("Vaso", 0.0, 0.1, 0.0)
+        bsa = np.sqrt((h*w)/3600)
+        
+        dobu = st.number_input("Dobutamine", 0.0, 10.0, 0.0); bb = st.number_input("Esmolol", 0.0, 1.0, 0.0)
+        fio2 = st.slider("FiO2", 0.21, 1.0, 0.4); peep = st.slider("PEEP", 0, 20, 5)
+        is_paced = st.checkbox("Pacemaker"); vent_mode = st.selectbox("Vent", ["Spontaneous", "Control (AC)"])
+        
+        if st.button("Bolus 500mL"): st.session_state['fluids'] += 500
+        live = st.checkbox("LIVE")
+
+    # Run L9 Simulator
+    sim = PatientSimulatorL9(res_mins)
+    drugs = {'norepi':norepi, 'vaso':vaso, 'dobu':dobu, 'bb':bb, 'fio2':fio2}
+    df = sim.run_deep(case_id, drugs, st.session_state['fluids'], bsa, peep, is_paced, vent_mode)
+    
+    # Counterfactual Sim (L8 base for comparison)
+    sim_b = PatientSimulator(60)
+    base_d = {'norepi':0, 'vaso':0, 'dobu':0, 'bb':0, 'fio2':0.21}
+    df_b = sim_b.run(case_id, base_d, 0, bsa, peep, False, 'Spontaneous')
+
+    # Calc Advanced Metrics
+    granger_sig, granger_p = DeepAnalytics.granger(df)
+    probs = Analytics.bayes_shock(df.iloc[-1])
+    sugg, conf = Analytics.rl_advisor(df.iloc[-1], drugs)
+    p10, p50, p90 = Analytics.monte_carlo_forecast(df)
+    t2, spe = Analytics.spc_multivariate(df)
+    src, _, reason = Analytics.signal_forensics(df['HR'].iloc[-120:], is_paced)
+    centroids = Analytics.inverse_centroids(df)
+    curr = df.iloc[-1]
+
+    # Render Function
+    def render_layout(df, i):
         st.markdown(f"""
         <div class="status-banner" style="border-left-color: {CONFIG.COLORS['ai']};">
             <div><div style="font-size:0.8rem; font-weight:800; color:{CONFIG.COLORS['ai']}">BAYESIAN STATE</div>
             <div style="font-size:1.5rem; font-weight:800;">{max(probs, key=probs.get).upper()}</div></div>
             <div style="text-align:right">
-                <div style="font-size:0.8rem; font-weight:700;">ANOMALY STATUS</div>
-                <div class="{'crit-pulse' if curr['anomaly']==-1 else ''}" style="font-size:2rem; font-weight:800; color:{CONFIG.COLORS['crit'] if curr['anomaly']==-1 else CONFIG.COLORS['ok']}">{ 'DETECTED' if curr['anomaly']==-1 else 'NORMAL' }</div>
+                <div style="font-size:0.8rem;">GFR: {curr['GFR']:.0f} | UO: {curr['UrineOutput']:.1f}</div>
+                <div style="font-size:1.2rem; font-weight:800;">{centroids[0]}</div>
             </div>
         </div>""", unsafe_allow_html=True)
-
-        t_main, t_resp, t_ai, t_spc, t_deep = st.tabs(["🫀 Clinical Command", "🫁 Respiratory", "🤖 AI & Forensics", "📊 SPC & Quality", "🔬 Deep Physics"])
         
-        with t_main:
-            cols = st.columns(6)
-            mets = [("MAP", curr['MAP']), ("CI", curr['CI']), ("SVRI", curr['SVRI']), ("Lactate", curr['Lactate']), ("O2ER", curr['O2ER']*100), ("CPO", curr['CPO'])]
-            for i, (l, v) in enumerate(mets):
-                cols[i].metric(l, f"{v:.1f}", f"{v - prev[l]:.1f}")
-                cols[i].plotly_chart(Viz.spark(df[l].iloc[-60:], CONFIG.COLORS['hemo'], f"s{i}_{ix}"), use_container_width=True)
-            
-            c1, c2, c3 = st.columns(3)
-            c1.plotly_chart(Viz.hemodynamic_profile(df, ix), use_container_width=True)
-            c1.markdown("<div class='clinical-hint'><b>Pump vs Pipes:</b> Classify shock (Cold/Wet vs Warm/Dry).</div>", unsafe_allow_html=True)
-            c2.plotly_chart(Viz.phase_space(df, ix), use_container_width=True)
-            c2.markdown("<div class='clinical-hint'><b>Coupling:</b> Detect metabolic uncoupling.</div>", unsafe_allow_html=True)
-            c3.plotly_chart(Viz.attractor_3d(df, ix), use_container_width=True)
-            c3.markdown("<div class='clinical-hint'><b>Trajectory:</b> 3D stability analysis.</div>", unsafe_allow_html=True)
-            
-            z1, z2 = st.columns(2)
-            z1.plotly_chart(Viz.forecast(df, p10, p50, p90, ix), use_container_width=True)
-            z1.markdown("<div class='clinical-hint'><b>Monte Carlo:</b> Stochastic MAP projection.</div>", unsafe_allow_html=True)
-            z2.plotly_chart(Viz.counterfactual(df, df_b, ix), use_container_width=True)
-            z2.markdown("<div class='clinical-hint'><b>Efficacy:</b> What if we hadn't treated?</div>", unsafe_allow_html=True)
-
-        with t_resp:
+        tabs = st.tabs(["🫀 Clinical", "🫁 Resp", "🤖 AI/Forensics", "📊 SPC", "🔬 Deep Physics"])
+        
+        with tabs[0]: 
             c1, c2 = st.columns(2)
-            c1.plotly_chart(Viz.vq_scatter(df, ix), use_container_width=True)
-            c1.markdown("<div class='clinical-hint'><b>V/Q:</b> Shunt vs Dead Space.</div>", unsafe_allow_html=True)
-            fig = make_subplots(rows=3, cols=1, shared_xaxes=True)
-            fig.add_trace(go.Scatter(y=df['SpO2'], name="SpO2"), row=1, col=1)
-            fig.add_trace(go.Scatter(y=df['PaCO2'], name="PaCO2"), row=2, col=1)
-            fig.add_trace(go.Scatter(y=df['Vd/Vt'], name="Vd/Vt"), row=3, col=1)
-            fig.update_layout(height=400, margin=dict(l=0,r=0,t=0,b=0))
-            c2.plotly_chart(fig, use_container_width=True, key=f"t_resp_{ix}")
-            c2.markdown("<div class='clinical-hint'><b>Gas Exchange:</b> Real-time ventilation metrics.</div>", unsafe_allow_html=True)
-
-        with t_ai:
-            c1, c2 = st.columns(2)
-            with c1:
-                st.plotly_chart(Viz.bayes(probs, ix), use_container_width=True)
-                st.info(f"RL Advisor: {sugg} ({conf}%)")
-                st.plotly_chart(Viz.chaos(df, src, ix), use_container_width=True)
-                st.markdown(f"<div class='clinical-hint'><b>Driver:</b> {src}. {reason}.</div>", unsafe_allow_html=True)
-            with c2:
-                st.plotly_chart(Viz.spectral(df, ix), use_container_width=True)
-                st.plotly_chart(Viz.wasserstein(df, ix), use_container_width=True)
-                st.plotly_chart(Viz.adv_forecast(df, ix), use_container_width=True)
-
-        with t_spc:
-            st.plotly_chart(Viz.spc_charts(df, ix), use_container_width=True)
-            st.markdown("<div class='clinical-hint'><b>SPC:</b> X-Bar/R-Chart for stability.</div>", unsafe_allow_html=True)
-            c1, c2 = st.columns(2)
-            c1.plotly_chart(Viz.mspc(t2, spe, ix), use_container_width=True)
-            c1.markdown("<div class='clinical-hint'><b>Multivariate:</b> T2 detects system shifts.</div>", unsafe_allow_html=True)
-            c2.plotly_chart(Viz.adv_control(df, ix), use_container_width=True)
+            c1.plotly_chart(Viz.hemodynamic_profile(df, i), use_container_width=True)
+            c1.markdown("<div class='clinical-hint'><b>Forrester Plot:</b> Classifies shock state based on Flow (CI) vs Resistance (SVR).</div>", unsafe_allow_html=True)
+            c2.plotly_chart(Viz.phase_space(df, i), use_container_width=True)
+            c2.markdown("<div class='clinical-hint'><b>Coupling:</b> Detects if the heart (Power) can meet metabolic demand (Lactate).</div>", unsafe_allow_html=True)
             
-            c3, c4 = st.columns(2)
-            c3.plotly_chart(Viz.method_comp(df, ix), use_container_width=True)
-            c4.plotly_chart(Viz.cpk_tol(df, ix), use_container_width=True)
-            
-        with t_deep:
-            st.markdown('<div class="zone-header">ZONE Z: ADVANCED PHYSIOLOGY</div>', unsafe_allow_html=True)
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Sympathetic Tone", f"{curr['Symp_Tone']:.2f}")
-            c2.metric("GFR", f"{curr['GFR']:.0f}", "mL/min")
-            c3.metric("Urine Output", f"{curr['UrineOutput']:.1f}", "mL/hr")
+        with tabs[4]: 
+            st.markdown('<div class="zone-header">ZONE Z: L9 ADVANCED PHYSICS</div>', unsafe_allow_html=True)
+            c1, c2 = st.columns(2)
+            c1.metric("Baroreflex Tone", f"{curr['Symp_Tone']:.2f}")
+            c2.metric("Granger (MAP->Lac)", f"p={granger_p:.4f}")
             
             d1, d2 = st.columns(2)
-            fig_mewma = px.line(df, x='Time', y='MEWMA', title="MEWMA Drift")
+            fig_mewma = px.line(df, x='Time', y='MEWMA', title="MEWMA Drift Detection")
             d1.plotly_chart(fig_mewma, use_container_width=True)
-            d1.markdown("<div class='clinical-hint'><b>MEWMA:</b> Multivariate EWMA. Detects subtle, simultaneous correlation shifts.</div>", unsafe_allow_html=True)
+            d1.markdown("<div class='clinical-hint'><b>MEWMA:</b> Multivariate EWMA detects subtle, simultaneous shifts in correlated vitals.</div>", unsafe_allow_html=True)
             
             fig_ae = px.area(df, x='Time', y='Recon_Error', title="Autoencoder Anomaly Score")
             d2.plotly_chart(fig_ae, use_container_width=True)
-            d2.markdown("<div class='clinical-hint'><b>Reconstruction Error:</b> Deviation from learned physiological manifold (Novelty Detection).</div>", unsafe_allow_html=True)
+            d2.markdown("<div class='clinical-hint'><b>Autoencoder:</b> Measures how 'strange' the current physiology is compared to the model's learned baseline.</div>", unsafe_allow_html=True)
             
             e1, e2 = st.columns(2)
-            e1.plotly_chart(Viz.recurrence_plot(df['MAP'].values, ix), use_container_width=True)
-            e1.markdown("<div class='clinical-hint'><b>Recurrence Plot:</b> Visualizes non-linear stability. Checkered=Stable. Dotty=Chaos.</div>", unsafe_allow_html=True)
-            e2.plotly_chart(Viz.phase_velocity(df, ix), use_container_width=True)
-            e2.markdown("<div class='clinical-hint'><b>Velocity Phase Space:</b> MAP vs dMAP/dt. Loops indicate autoregulation. Spirals indicate loss of control.</div>", unsafe_allow_html=True)
+            e1.plotly_chart(Viz.recurrence_plot(df['MAP'].values, i), use_container_width=True)
+            e1.markdown("<div class='clinical-hint'><b>Recurrence:</b> Visualizes non-linear stability. Periodic=Checkered, Chaotic=No pattern.</div>", unsafe_allow_html=True)
+            e2.plotly_chart(Viz.phase_velocity(df, i), use_container_width=True)
+            e2.markdown("<div class='clinical-hint'><b>Velocity Phase:</b> Plots Value vs Speed of Change. Spirals indicate loss of autoregulation.</div>", unsafe_allow_html=True)
             
-            f1, f2 = st.columns(2)
-            fig_pk = go.Figure()
-            fig_pk.add_trace(go.Scatter(x=df['Time'], y=df['Norepi_C1'], name="Central (C1)"))
-            fig_pk.update_layout(title="2-Compartment PK (Norepi)", height=250)
-            f1.plotly_chart(fig_pk, use_container_width=True)
-            f2.metric("Granger (MAP->Lac)", f"p={gp:.4f}")
-            f2.markdown("<div class='clinical-hint'><b>Causality:</b> Does MAP drive Lactate changes? Significant if p < 0.05.</div>", unsafe_allow_html=True)
+        with tabs[2]:
+            st.plotly_chart(Viz.chaos(df, src, i), use_container_width=True)
+            st.markdown("<div class='clinical-hint'><b>Poincaré Plot:</b> Visualizes HRV complexity. Cigar=Healthy, Dot=Stressed/Paced.</div>", unsafe_allow_html=True)
+            st.plotly_chart(Viz.spectral(df, i), use_container_width=True)
+            st.markdown("<div class='clinical-hint'><b>Spectral:</b> Frequency domain analysis of autonomic tone. LF=Sympathetic, HF=Vagal.</div>", unsafe_allow_html=True)
+            st.plotly_chart(Viz.wasserstein(df, i), use_container_width=True)
+            st.markdown("<div class='clinical-hint'><b>Wasserstein:</b> Quantifies the total 'distance' the patient state has drifted from admission.</div>", unsafe_allow_html=True)
+
+        with tabs[3]:
+             st.plotly_chart(Viz.spc_charts(df, i), use_container_width=True)
+             st.markdown("<div class='clinical-hint'><b>SPC:</b> Distinguishes signal from noise. Points outside red lines are significant.</div>", unsafe_allow_html=True)
+             st.plotly_chart(Viz.cpk_tol(df, i), use_container_width=True)
+             st.markdown("<div class='clinical-hint'><b>Cpk:</b> Process Capability. Is the patient capable of staying within safe MAP limits?</div>", unsafe_allow_html=True)
+
+        with tabs[1]:
+            st.plotly_chart(Viz.vq_scatter(df, i), use_container_width=True)
+            st.markdown("<div class='clinical-hint'><b>V/Q Scatter:</b> Maps Oxygenation (Shunt) vs Ventilation (Dead Space).</div>", unsafe_allow_html=True)
+            
+    # Render
+    if live:
+        holder = st.empty()
+        for i in range(max(10, res_mins-60), res_mins):
+            with holder.container(): render_layout(df.iloc[:i], i)
+            time.sleep(0.1)
+    else:
+        render_layout(df, len(df))
 
 if __name__ == "__main__":
-    app = App()
-    app.run()
+    main()
