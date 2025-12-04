@@ -4,10 +4,10 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-from scipy.signal import welch
+from scipy.signal import welch, find_peaks
 from scipy.stats import norm, multivariate_normal, wasserstein_distance, linregress, chi2, ks_2samp
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.ensemble import IsolationForest
 from sklearn.decomposition import PCA
 from sklearn.covariance import LedoitWolf
@@ -188,18 +188,18 @@ class AdvancedPKPD:
         return (emax * (conc**gamma)) / (ec50**gamma + conc**gamma)
 
 # ==========================================
-# 4. ANALYTICS, SPC, AI
+# 4. ANALYTICS, SPC, QA & AI
 # ==========================================
 class Analytics:
     @staticmethod
     def signal_forensics(ts, is_paced):
         arr = np.array(ts)
-        if is_paced or np.std(arr) < 0.5: return "EXTERNAL: PACEMAKER", 99, "Zero Variance (Quartz Precision)"
-        if np.max(np.abs(np.gradient(arr))) > 5.0: return "EXTERNAL: INFUSION", 90, "Non-Physiologic Step Change"
+        if is_paced or np.std(arr) < 0.5: return "EXTERNAL: PACEMAKER", 99, "Zero Variance (Quartz)"
+        if np.max(np.abs(np.gradient(arr))) > 5.0: return "EXTERNAL: INFUSION", 90, "Step Change"
         f, Pxx = welch(arr, fs=1/60)
         entropy = -np.sum((Pxx/np.sum(Pxx)) * np.log2((Pxx/np.sum(Pxx)) + 1e-12))
-        if entropy < 1.5: return "EXTERNAL: VENTILATOR", 85, "Periodic Machine Entrainment"
-        return "INTERNAL: AUTONOMIC", 80, "Fractal Bio-Complexity (Pink Noise)"
+        if entropy < 1.5: return "EXTERNAL: VENTILATOR", 85, "Periodic Entrainment"
+        return "INTERNAL: AUTONOMIC", 80, "Fractal Pink Noise"
 
     @staticmethod
     def bayes_shock(row):
@@ -231,6 +231,19 @@ class Analytics:
         vol = max(np.std(hist) if len(hist)>1 else 1.0, 0.5)
         paths = np.array([curr + np.cumsum(np.random.normal(0, vol, 30)) for _ in range(n_sims)])
         return np.percentile(paths, 10, 0), np.percentile(paths, 50, 0), np.percentile(paths, 90, 0)
+
+    @staticmethod
+    def spc_multivariate(df):
+        X = df[['MAP', 'CI', 'SVRI']].to_numpy()
+        try:
+            lw = LedoitWolf().fit(X[:60]) 
+            diff = X - lw.location_
+            t2 = np.sum(np.dot(diff, lw.precision_) * diff, axis=1)
+            pca = PCA(2).fit(StandardScaler().fit_transform(X))
+            X_recon = pca.inverse_transform(pca.transform(StandardScaler().fit_transform(X)))
+            spe = np.sum((StandardScaler().fit_transform(X) - X_recon)**2, axis=1)
+            return t2, spe
+        except: return np.zeros(len(X)), np.zeros(len(X))
     
     @staticmethod
     def inverse_centroids(df):
@@ -274,8 +287,8 @@ class QualityAssurance:
         if std == 0: return []
         z = (data - mean) / std
         violations = []
-        if len(z)>0 and abs(z[-1]) > 3: violations.append("1-3s")
-        if len(z)>1 and abs(z[-1]) > 2 and abs(z[-2]) > 2: violations.append("2-2s")
+        if len(z)>0 and abs(z[-1]) > 3: violations.append("1-3s (Random)")
+        if len(z)>1 and abs(z[-1]) > 2 and abs(z[-2]) > 2: violations.append("2-2s (Systematic)")
         return violations
     @staticmethod
     def mewma(df, lam=0.3):
@@ -309,8 +322,15 @@ class DeepAnalytics:
         model = MLPRegressor(hidden_layer_sizes=(8, 4, 8), random_state=42, max_iter=200).fit(X, X)
         return np.mean((X - model.predict(X))**2, axis=1)
 
+class ForecastingEngine:
+    @staticmethod
+    def fit_predict(data, steps=30):
+        try: hw = ExponentialSmoothing(data, trend='add').fit().forecast(steps)
+        except: hw = np.zeros(steps)
+        return hw
+
 # ==========================================
-# 5. SIMULATOR ORCHESTRATOR
+# 5. PATIENT SIMULATOR (ORCHESTRATOR)
 # ==========================================
 class PatientSimulator:
     def __init__(self, mins=360):
@@ -362,10 +382,11 @@ class PatientSimulatorL9(PatientSimulator):
         df['Norepi_C1'] = c1_ne
         df['MEWMA'] = QualityAssurance.mewma(df)
         df['Recon_Error'] = DeepAnalytics.autoencoder(df)
+        df['MAP_Kalman'] = DeepAnalytics.kalman_filter(df['MAP'].values)
         return df
 
 # ==========================================
-# 6. VISUALIZATION LAYER (L9)
+# 6. VISUALIZATION LAYER (L9 + EXPLANATIONS)
 # ==========================================
 class Viz:
     @staticmethod
@@ -393,7 +414,7 @@ class Viz:
         hr = np.maximum(df['HR'].iloc[-120:], 1.0); rr = 60000 / hr
         c = CONFIG.COLORS['ext'] if "EXTERNAL" in source else 'teal'
         fig = go.Figure(go.Scatter(x=rr.iloc[:-1], y=rr.iloc[1:], mode='markers', marker=dict(color=c, size=4, opacity=0.6)))
-        fig.update_layout(title=f"Chaos: {source}", height=200, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="RR(n)", yaxis_title="RR(n+1)")
+        fig.update_layout(title=f"Chaos: {source}", height=200, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="RR(n) [ms]", yaxis_title="RR(n+1) [ms]")
         return fig
 
     @staticmethod
@@ -498,12 +519,12 @@ class Viz:
         fig.add_trace(go.Scatter(y=d, line=dict(color='gray'), name="Raw"), row=1, col=1)
         fig.add_trace(go.Scatter(y=ewma, line=dict(color='blue'), name="EWMA"), row=1, col=1)
         fig.add_trace(go.Scatter(y=np.cumsum(d - np.mean(d)), name="CUSUM"), row=1, col=2)
-        fig.update_layout(height=250, margin=dict(l=10,r=10,t=30,b=20), title=f"Adv Control ({'Violations!' if violations else 'Stable'})")
+        fig.update_layout(height=250, margin=dict(l=10,r=10,t=30,b=20), title=f"Adv Control")
         return fig
 
     @staticmethod
     def adv_forecast(df, key):
-        try: hw = ExponentialSmoothing(df['MAP'].iloc[-60:], trend='add').fit().forecast(30)
+        try: hw = ForecastingEngine.fit_predict(df['MAP'].iloc[-60:].to_numpy())
         except: hw = np.zeros(30)
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=np.arange(60), y=df['MAP'].iloc[-60:], name="Hx", line=dict(color='black')))
@@ -516,12 +537,11 @@ class Viz:
         e = df['MAP'].iloc[:60]; l = df['MAP'].iloc[-60:]
         d = wasserstein_distance(e, l)
         fig = go.Figure()
-        fig.add_trace(go.Histogram(x=e, opacity=0.5, name="Base"))
-        fig.add_trace(go.Histogram(x=l, opacity=0.5, name="Curr"))
+        fig.add_trace(go.Histogram(x=e, opacity=0.5, name="Baseline"))
+        fig.add_trace(go.Histogram(x=l, opacity=0.5, name="Current"))
         fig.update_layout(height=200, margin=dict(l=10,r=10,t=30,b=20), title=f"Dist Shift (W={d:.1f})", barmode='overlay')
         return fig
     
-    # L9 New Visuals
     @staticmethod
     def recurrence_plot(data, key):
         d = data[-60:]; D = np.abs(d[:,None]-d[None,:]); eps=0.1*np.std(d)
@@ -537,7 +557,7 @@ class Viz:
         return fig
 
 # ==========================================
-# 8. MAIN EXECUTION & LAYOUT
+# 7. MAIN EXECUTION & LAYOUT
 # ==========================================
 
 if 'events' not in st.session_state: st.session_state['events'] = []
@@ -567,7 +587,7 @@ def main():
     drugs = {'norepi':norepi, 'vaso':vaso, 'dobu':dobu, 'bb':bb, 'fio2':fio2}
     df = sim.run_deep(case_id, drugs, st.session_state['fluids'], bsa, peep, is_paced, vent_mode)
     
-    # Counterfactual Sim (L8 base for comparison)
+    # Counterfactual Sim
     sim_b = PatientSimulator(60)
     base_d = {'norepi':0, 'vaso':0, 'dobu':0, 'bb':0, 'fio2':0.21}
     df_b = sim_b.run(case_id, base_d, 0, bsa, peep, False, 'Spontaneous')
