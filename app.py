@@ -194,8 +194,8 @@ class Analytics:
     @staticmethod
     def signal_forensics(ts, is_paced):
         arr = np.array(ts)
-        if is_paced or np.std(arr) < 0.5: return "EXTERNAL: PACEMAKER", 99, "Zero Variance (Quartz)"
-        if np.max(np.abs(np.gradient(arr))) > 5.0: return "EXTERNAL: INFUSION", 90, "Step Change"
+        if is_paced or np.std(arr) < 0.5: return "EXTERNAL: PACEMAKER", 99, "Zero Variance (Quartz Precision)"
+        if np.max(np.abs(np.gradient(arr))) > 5.0: return "EXTERNAL: INFUSION", 90, "Non-Physiologic Step Change"
         f, Pxx = welch(arr, fs=1/60)
         entropy = -np.sum((Pxx/np.sum(Pxx)) * np.log2((Pxx/np.sum(Pxx)) + 1e-12))
         if entropy < 1.5: return "EXTERNAL: VENTILATOR", 85, "Periodic Entrainment"
@@ -207,9 +207,8 @@ class Analytics:
         covs = {"Cardiogenic": [[0.5, -100], [-100, 150000]], "Distributive": [[1.0, -200], [-200, 100000]],
                 "Hypovolemic": [[0.4, -50], [-50, 200000]], "Stable": [[0.6, -150], [-150, 150000]]}
         scores = {}; total = 0
-        x = [row['CI'], row['SVRI']]
         for k, m in means.items():
-            try: scores[k] = multivariate_normal.pdf(x, m, covs[k]); total += scores[k]
+            try: scores[k] = multivariate_normal.pdf([row['CI'], row['SVRI']], m, covs[k]); total += scores[k]
             except: scores[k] = 0
         return {k: (v/total)*100 for k, v in scores.items()} if total > 1e-9 else {k:25.0 for k in means}
 
@@ -330,7 +329,7 @@ class ForecastingEngine:
         return hw
 
 # ==========================================
-# 5. PATIENT SIMULATOR (ORCHESTRATOR)
+# 5. PATIENT SIMULATOR
 # ==========================================
 class PatientSimulator:
     def __init__(self, mins=360):
@@ -386,7 +385,7 @@ class PatientSimulatorL9(PatientSimulator):
         return df
 
 # ==========================================
-# 6. VISUALIZATION LAYER (L9 + EXPLANATIONS)
+# 6. VISUALIZATION LAYER
 # ==========================================
 class Viz:
     @staticmethod
@@ -518,6 +517,7 @@ class Viz:
         fig = make_subplots(rows=1, cols=2, subplot_titles=("EWMA", "CUSUM"))
         fig.add_trace(go.Scatter(y=d, line=dict(color='gray'), name="Raw"), row=1, col=1)
         fig.add_trace(go.Scatter(y=ewma, line=dict(color='blue'), name="EWMA"), row=1, col=1)
+        # CUSUM simplified visualization
         fig.add_trace(go.Scatter(y=np.cumsum(d - np.mean(d)), name="CUSUM"), row=1, col=2)
         fig.update_layout(height=250, margin=dict(l=10,r=10,t=30,b=20), title=f"Adv Control")
         return fig
@@ -542,10 +542,12 @@ class Viz:
         fig.update_layout(height=200, margin=dict(l=10,r=10,t=30,b=20), title=f"Dist Shift (W={d:.1f})", barmode='overlay')
         return fig
     
+    # L9 New Visuals
     @staticmethod
     def recurrence_plot(data, key):
         d = data[-60:]; D = np.abs(d[:,None]-d[None,:]); eps=0.1*np.std(d)
-        fig = px.imshow((D<eps).astype(int), color_continuous_scale='binary', title="Recurrence Plot")
+        # Fix: Use 'gray' color scale which is valid in Plotly Express
+        fig = px.imshow((D<eps).astype(int), color_continuous_scale='gray', title="Recurrence Plot")
         fig.update_layout(height=250, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="Time i", yaxis_title="Time j")
         return fig
     
@@ -557,7 +559,7 @@ class Viz:
         return fig
 
 # ==========================================
-# 7. MAIN EXECUTION & LAYOUT
+# 8. MAIN EXECUTION & LAYOUT
 # ==========================================
 
 if 'events' not in st.session_state: st.session_state['events'] = []
@@ -640,10 +642,18 @@ def main():
             
             e1, e2 = st.columns(2)
             e1.plotly_chart(Viz.recurrence_plot(df['MAP'].values, i), use_container_width=True)
-            e1.markdown("<div class='clinical-hint'><b>Recurrence:</b> Visualizes non-linear stability. Periodic=Checkered, Chaotic=No pattern.</div>", unsafe_allow_html=True)
+            e1.markdown("<div class='clinical-hint'><b>Recurrence:</b> Visualizes non-linear stability. Checkered=Stable. Dotty=Chaos.</div>", unsafe_allow_html=True)
             e2.plotly_chart(Viz.phase_velocity(df, i), use_container_width=True)
             e2.markdown("<div class='clinical-hint'><b>Velocity Phase:</b> Plots Value vs Speed of Change. Spirals indicate loss of autoregulation.</div>", unsafe_allow_html=True)
             
+            f1, f2 = st.columns(2)
+            fig_pk = go.Figure()
+            fig_pk.add_trace(go.Scatter(x=df['Time'], y=df['Norepi_C1'], name="Central (C1)"))
+            fig_pk.update_layout(title="2-Compartment PK (Norepi)", height=250)
+            f1.plotly_chart(fig_pk, use_container_width=True)
+            f2.metric("Granger (MAP->Lac)", f"p={granger_p:.4f}")
+            f2.markdown("<div class='clinical-hint'><b>Causality:</b> Does MAP drive Lactate changes? Significant if p < 0.05.</div>", unsafe_allow_html=True)
+
         with tabs[2]:
             st.plotly_chart(Viz.chaos(df, src, i), use_container_width=True)
             st.markdown("<div class='clinical-hint'><b>Poincaré Plot:</b> Visualizes HRV complexity. Cigar=Healthy, Dot=Stressed/Paced.</div>", unsafe_allow_html=True)
