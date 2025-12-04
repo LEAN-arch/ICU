@@ -5,9 +5,9 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 from scipy.signal import welch
-from scipy.stats import norm, multivariate_normal, wasserstein_distance, linregress, chi2
+from scipy.stats import norm, multivariate_normal, wasserstein_distance, linregress, chi2, ks_2samp
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.ensemble import IsolationForest
 from sklearn.decomposition import PCA
 from sklearn.covariance import LedoitWolf
@@ -25,6 +25,7 @@ st.set_page_config(
 )
 
 class CONFIG:
+    # UI Colors
     COLORS = {
         "bg": "#f8fafc", "card": "#ffffff", "text": "#0f172a", "muted": "#64748b",
         "crit": "#dc2626", "warn": "#d97706", "ok": "#059669",
@@ -53,14 +54,17 @@ STYLING = f"""
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Roboto+Mono:wght@500;700&display=swap');
     .stApp {{ background-color: {CONFIG.COLORS['bg']}; color: {CONFIG.COLORS['text']}; font-family: 'Inter', sans-serif; }}
     
+    /* Metrics & Cards */
     div[data-testid="stMetric"] {{ background-color: {CONFIG.COLORS['card']}; border: 1px solid {CONFIG.COLORS['muted']}33; border-radius: 6px; padding: 10px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }}
     div[data-testid="stMetric"] label {{ color: {CONFIG.COLORS['muted']}; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; }}
     div[data-testid="stMetric"] div[data-testid="stMetricValue"] {{ font-family: 'Roboto Mono', monospace; font-size: 1.4rem; font-weight: 700; }}
     
+    /* Headers & Banners */
     .zone-header {{ font-size: 0.85rem; font-weight: 900; color: {CONFIG.COLORS['text']}; text-transform: uppercase; border-bottom: 2px solid {CONFIG.COLORS['info']}33; margin: 25px 0 10px 0; letter-spacing: 0.05em; }}
     .status-banner {{ padding: 15px; border-radius: 8px; background: {CONFIG.COLORS['card']}; border-left: 6px solid {CONFIG.COLORS['ai']}; margin-bottom: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; }}
     .clinical-hint {{ font-size: 0.75rem; color: {CONFIG.COLORS['muted']}; background: #f1f5f9; padding: 8px; border-radius: 4px; margin-top: 5px; border-left: 3px solid {CONFIG.COLORS['info']}; }}
     
+    /* Animations */
     .crit-pulse {{ animation: pulse-red 2s infinite; color: {CONFIG.COLORS['crit']}; }}
     @keyframes pulse-red {{ 0% {{ opacity: 1; }} 50% {{ opacity: 0.5; }} 100% {{ opacity: 1; }} }}
 </style>
@@ -78,33 +82,22 @@ class Utils:
         t = np.linspace(0, 1, n)
         dW = Utils._rng.normal(0, np.sqrt(1/n), n)
         B = start + np.cumsum(dW) - t * (np.cumsum(dW)[-1] - (end - start))
-        
-        if noise_type == 'pink': 
-            noise = np.convolve(Utils._rng.normal(0, 0.5, n), np.ones(8)/8, mode='same')
-        elif noise_type == 'periodic': 
-            noise = np.sin(np.linspace(0, n/4, n)) * 2.0
-        elif noise_type == 'white':
-            noise = Utils._rng.normal(0, 0.1, n)
-        else:
-            noise = np.zeros(n)
-            
+        if noise_type == 'pink': noise = np.convolve(Utils._rng.normal(0, 0.5, n), np.ones(8)/8, mode='same')
+        elif noise_type == 'periodic': noise = np.sin(np.linspace(0, n/4, n)) * 2.0
+        else: noise = Utils._rng.normal(0, 0.1, n)
         return B + (noise * volatility)
 
 # ==========================================
-# 3. PHYSIOLOGY ENGINES (UNIFIED CLASS)
+# 3. PHYSIOLOGY ENGINES (VECTORIZED)
 # ==========================================
 class Physiology:
-    
     class Autonomic:
         @staticmethod
         def generate(mins, p, is_paced, vent_mode):
             # Heart Rate Logic (Internal vs External)
-            if is_paced: 
-                hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][0], 0.1, 'white')
-            elif vent_mode == 'Control (AC)': 
-                hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][1], 1.5, 'periodic')
-            else: 
-                hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][1], 1.5, 'pink')
+            if is_paced: hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][0], 0.1, 'white')
+            elif vent_mode == 'Control (AC)': hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][1], 1.5, 'periodic')
+            else: hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][1], 1.5, 'pink')
             
             # Other vitals (Bio-driven)
             map_r = np.maximum(Utils.brownian_bridge(mins, p['map'][0], p['map'][1], 1.2, 'pink'), 20.0)
@@ -118,38 +111,25 @@ class Physiology:
         def apply(map_b, ci_b, hr_b, svri_b, drugs, mins):
             t = np.arange(mins)
             e_map, e_ci, e_hr, e_svr = np.zeros(mins), np.zeros(mins), np.zeros(mins), np.zeros(mins)
-            
             for d, dose in drugs.items():
                 if dose <= 0: continue
                 pk = CONFIG.DRUG_PK.get(d)
-                # Wash-in * Tolerance
                 k = (1 - np.exp(-t/pk['tau'])) * np.exp(-t/pk['tol'])
-                
                 if 'map' in pk: e_map += dose * pk['map'] * k
                 if 'co' in pk: e_ci += dose * pk['co'] * k
                 if 'hr' in pk: e_hr += dose * pk['hr'] * k
                 if 'svr' in pk: e_svr += dose * pk['svr'] * k
-                
-            return (np.maximum(map_b+e_map, 10), np.maximum(ci_b+e_ci, 0.1), 
-                    np.maximum(hr_b+e_hr, 20), np.maximum(svri_b+e_svr, 50))
+            return np.maximum(map_b+e_map, 10), np.maximum(ci_b+e_ci, 0.1), np.maximum(hr_b+e_hr, 20), np.maximum(svri_b+e_svr, 50)
 
     class Respiratory:
         @staticmethod
         def exchange(fio2, rr, shunt, peep, mins, copd):
-            # Dead Space
             vd_vt = np.clip(0.3 * copd + (0.1 if copd>1.0 else 0), 0.1, 0.8)
             va = np.maximum((rr * 0.5) * (1 - vd_vt), 0.5)
-            
             paco2 = (CONFIG.VCO2_CONST * 0.863) / va
-            
-            # Alveolar Gas Eq
             p_ideal = np.clip((fio2 * (CONFIG.ATM_PRESSURE - CONFIG.H2O_PRESSURE)) - (paco2 / CONFIG.R_QUOTIENT), 0, CONFIG.MAX_PAO2)
-            
-            # Shunt & PEEP
             pao2 = p_ideal * (1 - (shunt * np.exp(-0.08 * peep)))
-            
-            # SpO2
-            spo2 = 100 * (np.maximum(pao2, 0.1)**3 / (np.maximum(pao2, 0.1)**3 + 26**3)) 
+            spo2 = 100 * (np.maximum(pao2, 0.1)**3 / (np.maximum(pao2, 0.1)**3 + 26**3)) # P50=26
             return pao2, paco2, spo2, np.full(mins, vd_vt)
 
     class Metabolic:
@@ -158,16 +138,11 @@ class Physiology:
             do2i = ci * hb * CONFIG.HB_CONVERSION * (spo2/100) * 10
             vo2i = np.full(mins, 125.0 * stress)
             o2er = vo2i / np.maximum(do2i, 1.0)
-            
-            lactate = np.zeros(mins)
-            lac = 1.0
-            
+            lactate = np.zeros(mins); lac = 1.0
             prod = np.where((do2i < CONFIG.LAC_PROD_THRESH) | (o2er > 0.5), 0.2, 0.0)
-            
             for i in range(mins):
                 lac = max(0.6, lac + prod[i] - (CONFIG.LAC_CLEAR_RATE * (ci[i]/2.5)))
                 lactate[i] = lac
-                
             return do2i, vo2i, o2er, lactate
 
 # ==========================================
@@ -180,12 +155,8 @@ class Analytics:
         arr = np.array(ts)
         if is_paced or np.std(arr) < 0.5: return "EXTERNAL: PACEMAKER", 99, "Zero Variance (Quartz)"
         if np.max(np.abs(np.gradient(arr))) > 5.0: return "EXTERNAL: INFUSION", 90, "Step Change"
-        
         f, Pxx = welch(arr, fs=1/60)
-        # Spectral Entropy
-        p_norm = Pxx / np.sum(Pxx)
-        entropy = -np.sum(p_norm * np.log2(p_norm + 1e-12))
-        
+        entropy = -np.sum((Pxx/np.sum(Pxx)) * np.log2((Pxx/np.sum(Pxx)) + 1e-12))
         if entropy < 1.5: return "EXTERNAL: VENTILATOR", 85, "Periodic Entrainment"
         return "INTERNAL: AUTONOMIC", 80, "Fractal Pink Noise"
 
@@ -205,31 +176,15 @@ class Analytics:
         return {k: (v/total)*100 for k, v in scores.items()} if total > 1e-9 else {k:25.0 for k in means}
 
     @staticmethod
-    def rl_advisor(row, drugs):
-        if row['MAP'] < 65:
-            if row['CI'] < 2.2: return "Titrate Dobutamine", 88
-            else: return "Increase Norepi", 90
-        return "Maintain", 99
-
-    @staticmethod
-    def detect_anomalies(df):
-        # Handle NaN/Inf before fitting
-        X = df[['MAP','CI','SVRI']].fillna(method='bfill').fillna(0)
-        df['anomaly'] = IsolationForest(contamination=0.05, random_state=42).fit_predict(X)
-        return df
-
-    @staticmethod
     def spc_multivariate(df):
         X = df[['MAP', 'CI', 'SVRI']].to_numpy()
         try:
             lw = LedoitWolf().fit(X[:60]) # Baseline
             diff = X - lw.location_
             t2 = np.sum(np.dot(diff, lw.precision_) * diff, axis=1)
-            
             pca = PCA(2).fit(StandardScaler().fit_transform(X))
-            X_std = StandardScaler().fit_transform(X)
-            X_recon = pca.inverse_transform(pca.transform(X_std))
-            spe = np.sum((X_std - X_recon)**2, axis=1)
+            X_recon = pca.inverse_transform(pca.transform(StandardScaler().fit_transform(X)))
+            spe = np.sum((StandardScaler().fit_transform(X) - X_recon)**2, axis=1)
             return t2, spe
         except: return np.zeros(len(X)), np.zeros(len(X))
 
@@ -239,6 +194,18 @@ class Analytics:
         vol = max(np.std(hist) if len(hist)>1 else 1.0, 0.5)
         paths = np.array([curr + np.cumsum(np.random.normal(0, vol, 30)) for _ in range(n_sims)])
         return np.percentile(paths, 10, 0), np.percentile(paths, 50, 0), np.percentile(paths, 90, 0)
+
+    @staticmethod
+    def rl_advisor(row, drugs):
+        if row['MAP'] < 65:
+            if row['CI'] < 2.2: return "Titrate Dobutamine", 88
+            else: return "Increase Norepi", 90
+        return "Maintain", 99
+
+    @staticmethod
+    def detect_anomalies(df):
+        df['anomaly'] = IsolationForest(contamination=0.05).fit_predict(df[['MAP','CI','SVRI']].fillna(0))
+        return df
     
     @staticmethod
     def inverse_centroids(df):
@@ -251,7 +218,46 @@ class Analytics:
         except: return ["Calc Error"]
 
 # ==========================================
-# 5. VISUALIZATION (FULL SUITE)
+# 5. SIMULATOR ORCHESTRATOR
+# ==========================================
+class PatientSimulator:
+    def __init__(self, mins=360):
+        self.mins = mins
+        self.t = np.arange(mins)
+        
+    def run(self, case_id, drugs, fluids, bsa, peep, is_paced, vent_mode):
+        cases = {
+            "65M Post-CABG": {'ci':(2.4, 1.8), 'map':(75, 55), 'svri':(2000, 1600), 'hr':(85, 95), 'shunt':0.10, 'copd':1.0, 'vo2_stress': 1.0},
+            "24F Septic Shock": {'ci':(3.5, 5.5), 'map':(65, 45), 'svri':(1200, 500), 'hr':(110, 140), 'shunt':0.15, 'copd':1.0, 'vo2_stress': 1.4},
+            "82M HFpEF Sepsis": {'ci':(2.2, 1.8), 'map':(85, 55), 'svri':(2400, 1800), 'hr':(80, 110), 'shunt':0.20, 'copd':1.5, 'vo2_stress': 1.1},
+            "50M Trauma": {'ci':(3.0, 1.5), 'map':(70, 40), 'svri':(2500, 3200), 'hr':(100, 150), 'shunt':0.05, 'copd':1.0, 'vo2_stress': 0.9}
+        }
+        p = cases[case_id]
+        seed = len(case_id)+42
+        
+        Utils.set_seed(seed)
+        
+        hr, map_r, ci_r, svri_r, rr = Physiology.Autonomic.generate(self.mins, p, is_paced, vent_mode)
+        
+        ppv = (20 if "Trauma" in case_id else 12) + (np.sin(self.t/8)*4)
+        ci_fluid = (fluids/500) * (0.4 if np.mean(ppv)>13 else 0.05)
+        
+        map_f, ci_f, hr_f, svri_f = Physiology.PKPD.apply(map_r, ci_r+ci_fluid, hr, svri_r, drugs, self.mins)
+        pao2, paco2, spo2, vd_vt = Physiology.Respiratory.exchange(drugs['fio2'], rr, p['shunt'], peep, self.mins, p['copd'])
+        hb = 8.0 if "Trauma" in case_id else 12.0
+        do2i, vo2i, o2er, lactate = Physiology.Metabolic.calculate(ci_f, hb, spo2, self.mins, p['vo2_stress'])
+        
+        df = pd.DataFrame({
+            "Time": self.t, "HR": hr_f, "MAP": map_f, "CI": ci_f, "SVRI": svri_f,
+            "CO": ci_f * bsa, "SVR": svri_f / bsa,
+            "Lactate": lactate, "SpO2": spo2, "PaO2": pao2, "PaCO2": paco2, "RR": rr,
+            "DO2I": do2i, "VO2I": vo2i, "O2ER": o2er, "Vd/Vt": vd_vt,
+            "CPO": (map_f * (ci_f * bsa)) / 451
+        }).fillna(0)
+        return df
+
+# ==========================================
+# 6. VISUALIZATION FUNCTIONS (COMPLETE)
 # ==========================================
 class Viz:
     @staticmethod
@@ -410,7 +416,7 @@ class Viz:
         return fig
 
 # ==========================================
-# 6. APP ORCHESTRATION
+# 7. APP ORCHESTRATION
 # ==========================================
 class App:
     def __init__(self):
