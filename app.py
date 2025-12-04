@@ -15,17 +15,16 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import time
 
 # ==========================================
-# 1. CONFIGURATION & MEDICAL THEME
+# 1. CONFIGURATION & THEME
 # ==========================================
 st.set_page_config(
-    page_title="TITAN | ULTIMATE COMMAND CENTER",
+    page_title="TITAN | ULTIMATE CDS",
     layout="wide",
     initial_sidebar_state="expanded",
     page_icon="🧬"
 )
 
 class CONFIG:
-    # UI Colors
     COLORS = {
         "bg": "#f8fafc", "card": "#ffffff", "text": "#0f172a", "muted": "#64748b",
         "crit": "#dc2626", "warn": "#d97706", "ok": "#059669",
@@ -34,11 +33,9 @@ class CONFIG:
         "ext": "#d946ef", "spc": "#059669"
     }
     
-    # Physics Constants
     ATM_PRESSURE = 760.0; H2O_PRESSURE = 47.0; R_QUOTIENT = 0.8; MAX_PAO2 = 600.0
     HB_CONVERSION = 1.34; LAC_PROD_THRESH = 330.0; LAC_CLEAR_RATE = 0.05; VCO2_CONST = 130
     
-    # Drug PK (Potency, Tau, Tolerance)
     DRUG_PK = {
         'norepi': {'svr': 2500.0, 'map': 120.0, 'co': 0.8, 'tau': 2.0, 'tol': 1440.0}, 
         'vaso':   {'svr': 4000.0, 'map': 150.0, 'co': -0.2, 'tau': 5.0, 'tol': 2880.0}, 
@@ -46,7 +43,6 @@ class CONFIG:
         'bb':     {'svr': 50.0, 'map': -15.0, 'co': -2.0, 'hr': -35.0, 'tau': 4.0, 'tol': 5000.0}
     }
     
-    # SPC & QA Limits
     MAP_LSL = 65.0; MAP_USL = 110.0; CUSUM_H = 4.0; CUSUM_K = 0.5
 
 STYLING = f"""
@@ -86,18 +82,16 @@ class Utils:
         return B + (noise * volatility)
 
 # ==========================================
-# 3. PHYSIOLOGY ENGINES (VECTORIZED)
+# 3. PHYSIOLOGY ENGINES
 # ==========================================
 class Physiology:
     class Autonomic:
         @staticmethod
         def generate(mins, p, is_paced, vent_mode):
-            # Heart Rate Logic (Internal vs External)
             if is_paced: hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][0], 0.1, 'white')
             elif vent_mode == 'Control (AC)': hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][1], 1.5, 'periodic')
             else: hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][1], 1.5, 'pink')
             
-            # Other vitals (Bio-driven)
             map_r = np.maximum(Utils.brownian_bridge(mins, p['map'][0], p['map'][1], 1.2, 'pink'), 20.0)
             ci = np.maximum(Utils.brownian_bridge(mins, p['ci'][0], p['ci'][1], 0.2, 'pink'), 0.5)
             svri = np.maximum(Utils.brownian_bridge(mins, p['svri'][0], p['svri'][1], 100.0, 'pink'), 100.0)
@@ -128,7 +122,7 @@ class Physiology:
             paco2 = (CONFIG.VCO2_CONST * 0.863) / va
             p_ideal = np.clip((fio2 * (CONFIG.ATM_PRESSURE - CONFIG.H2O_PRESSURE)) - (paco2 / CONFIG.R_QUOTIENT), 0, CONFIG.MAX_PAO2)
             pao2 = p_ideal * (1 - (shunt * np.exp(-0.08 * peep)))
-            spo2 = 100 * (np.maximum(pao2, 0.1)**3 / (np.maximum(pao2, 0.1)**3 + 26**3)) 
+            spo2 = 100 * (np.maximum(pao2, 0.1)**3 / (np.maximum(pao2, 0.1)**3 + 26**3))
             return pao2, paco2, spo2, np.full(mins, vd_vt)
 
     class Metabolic:
@@ -145,18 +139,18 @@ class Physiology:
             return do2i, vo2i, o2er, lactate
 
 # ==========================================
-# 4. ANALYTICS, SPC & QA
+# 4. ANALYTICS, SPC & FORENSICS
 # ==========================================
 class Analytics:
     @staticmethod
     def signal_forensics(ts, is_paced):
         arr = np.array(ts)
-        if is_paced or np.std(arr) < 0.5: return "EXTERNAL: PACEMAKER", 99, "Zero Variance (Quartz)"
-        if np.max(np.abs(np.gradient(arr))) > 5.0: return "EXTERNAL: INFUSION", 90, "Step Change"
+        if is_paced or np.std(arr) < 0.5: return "EXTERNAL: PACEMAKER", 99, "Zero Variance (Quartz Precision)"
+        if np.max(np.abs(np.gradient(arr))) > 5.0: return "EXTERNAL: INFUSION", 90, "Non-Physiologic Step Change"
         f, Pxx = welch(arr, fs=1/60)
         entropy = -np.sum((Pxx/np.sum(Pxx)) * np.log2((Pxx/np.sum(Pxx)) + 1e-12))
-        if entropy < 1.5: return "EXTERNAL: VENTILATOR", 85, "Periodic Entrainment"
-        return "INTERNAL: AUTONOMIC", 80, "Fractal Pink Noise"
+        if entropy < 1.5: return "EXTERNAL: VENTILATOR", 85, "Periodic Machine Entrainment"
+        return "INTERNAL: AUTONOMIC", 80, "Fractal Bio-Complexity (Pink Noise)"
 
     @staticmethod
     def bayes_shock(row):
@@ -164,10 +158,9 @@ class Analytics:
         covs = {"Cardiogenic": [[0.5, -100], [-100, 150000]], "Distributive": [[1.0, -200], [-200, 100000]],
                 "Hypovolemic": [[0.4, -50], [-50, 200000]], "Stable": [[0.6, -150], [-150, 150000]]}
         scores = {}; total = 0
-        x = [row['CI'], row['SVRI']]
         for k, m in means.items():
             try:
-                scores[k] = multivariate_normal.pdf(x, m, covs[k])
+                scores[k] = multivariate_normal.pdf([row['CI'], row['SVRI']], m, covs[k])
                 total += scores[k]
             except: scores[k] = 0
         return {k: (v/total)*100 for k, v in scores.items()} if total > 1e-9 else {k:25.0 for k in means}
@@ -175,9 +168,9 @@ class Analytics:
     @staticmethod
     def rl_advisor(row, drugs):
         if row['MAP'] < 65:
-            if row['CI'] < 2.2: return "Titrate Dobutamine", 88
-            else: return "Increase Norepi", 90
-        return "Maintain", 99
+            if row['CI'] < 2.2: return "Titrate Dobutamine (Inotrope)", 88
+            else: return "Increase Norepinephrine (Vasopressor)", 90
+        return "Maintain Current Therapy", 99
 
     @staticmethod
     def detect_anomalies(df):
@@ -323,7 +316,7 @@ class Viz:
     def attractor_3d(df, key):
         r = df.iloc[-60:]
         fig = go.Figure(go.Scatter3d(x=r['CPO'], y=r['SVRI'], z=r['Lactate'], mode='lines+markers', marker=dict(size=3, color=r.index, colorscale='Viridis'), line=dict(width=2)))
-        fig.update_layout(scene=dict(xaxis_title='Power [W]', yaxis_title='SVRI', zaxis_title='Lac [mM]'), margin=dict(l=0,r=0,b=0,t=30), height=250, title="3D Phase Space Trajectory")
+        fig.update_layout(scene=dict(xaxis_title='Power [W]', yaxis_title='SVRI [dyn·s]', zaxis_title='Lac [mM]'), margin=dict(l=0,r=0,b=0,t=30), height=250, title="3D Phase Space Trajectory")
         return fig
 
     @staticmethod
@@ -331,7 +324,7 @@ class Viz:
         hr = np.maximum(df['HR'].iloc[-120:], 1.0); rr = 60000 / hr
         c = CONFIG.COLORS['ext'] if "EXTERNAL" in source else 'teal'
         fig = go.Figure(go.Scatter(x=rr.iloc[:-1], y=rr.iloc[1:], mode='markers', marker=dict(color=c, size=4, opacity=0.6)))
-        fig.update_layout(title=f"Chaos: {source}", height=200, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="RR(n)", yaxis_title="RR(n+1)")
+        fig.update_layout(title=f"Chaos: {source}", height=200, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="RR(n) [ms]", yaxis_title="RR(n+1) [ms]")
         return fig
 
     @staticmethod
@@ -340,7 +333,7 @@ class Viz:
         f, Pxx = welch(data, fs=1/60)
         fig = px.line(x=f, y=Pxx)
         fig.add_vline(x=0.04, line_dash="dot", annotation_text="LF"); fig.add_vline(x=0.15, line_dash="dot", annotation_text="HF")
-        fig.update_layout(title="Spectral HRV", height=200, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="Hz", yaxis_title="Power")
+        fig.update_layout(title="Spectral HRV", height=200, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="Frequency [Hz]", yaxis_title="Power Density")
         return fig
 
     @staticmethod
@@ -349,7 +342,7 @@ class Viz:
         fig = go.Figure()
         fig.add_hline(y=2000, line_dash="dot", annotation_text="Vaso"); fig.add_vline(x=2.2, line_dash="dot", annotation_text="Low Flow")
         fig.add_trace(go.Scatter(x=r['CI'], y=r['SVRI'], mode='markers', marker=dict(color=r.index, colorscale='Viridis'), name="State"))
-        fig.update_layout(title="Pump vs Pipes", height=250, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="CI", yaxis_title="SVRI")
+        fig.update_layout(title="Pump vs Pipes (Forrester)", height=250, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="CI [L/min/m²]", yaxis_title="SVRI [dyn·s·cm⁻⁵·m²]")
         return fig
 
     @staticmethod
@@ -358,13 +351,13 @@ class Viz:
         fig = go.Figure()
         fig.add_shape(type="rect", x0=0, x1=0.6, y0=2, y1=15, fillcolor="rgba(255,0,0,0.1)", line_width=0)
         fig.add_trace(go.Scatter(x=r['CPO'], y=r['Lactate'], mode='lines+markers', marker=dict(color=r.index, colorscale='Bluered'), name="Traj"))
-        fig.update_layout(title="Hemo-Metabolic Coupling", height=250, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="CPO", yaxis_title="Lac")
+        fig.update_layout(title="Hemo-Metabolic Coupling", height=250, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="Power [W]", yaxis_title="Lactate [mM]")
         return fig
 
     @staticmethod
     def vq_scatter(df, key):
         fig = px.scatter(df.iloc[-60:], x="PaO2", y="SpO2", color="PaCO2", color_continuous_scale="Bluered")
-        fig.update_layout(title="V/Q Status", height=250, margin=dict(l=20,r=20,t=30,b=20))
+        fig.update_layout(title="V/Q Status", height=250, margin=dict(l=20,r=20,t=30,b=20), xaxis_title="PaO2 [mmHg]", yaxis_title="SpO2 [%]")
         return fig
 
     @staticmethod
@@ -408,7 +401,7 @@ class Viz:
         fx = np.arange(30, 60)
         fig.add_trace(go.Scatter(x=np.concatenate([fx, fx[::-1]]), y=np.concatenate([p90, p10[::-1]]), fill='toself', fillcolor='rgba(0,0,255,0.2)', line=dict(width=0), name="CI"))
         fig.add_trace(go.Scatter(x=fx, y=p50, line=dict(dash='dot', color='blue'), name="Median"))
-        fig.update_layout(height=250, margin=dict(l=20,r=20,t=30,b=20), title="Monte Carlo Forecast")
+        fig.update_layout(height=250, margin=dict(l=20,r=20,t=30,b=20), title="Monte Carlo Forecast", xaxis_title="Time [min]", yaxis_title="MAP [mmHg]")
         return fig
 
     @staticmethod
@@ -416,12 +409,12 @@ class Viz:
         fig = go.Figure()
         fig.add_trace(go.Scatter(y=df['MAP'].iloc[-60:], name="Rx", line=dict(color=CONFIG.COLORS['ok'])))
         fig.add_trace(go.Scatter(y=df_b['MAP'].iloc[-60:], name="No Rx", line=dict(dash='dot', color=CONFIG.COLORS['crit'])))
-        fig.update_layout(height=250, margin=dict(l=20,r=20,t=30,b=20), title="Counterfactual")
+        fig.update_layout(height=250, margin=dict(l=20,r=20,t=30,b=20), title="Counterfactual", xaxis_title="Time [min]", yaxis_title="MAP [mmHg]")
         return fig
 
     @staticmethod
     def mspc(t2, spe, key):
-        fig = make_subplots(rows=1, cols=2, subplot_titles=("T²", "SPE"))
+        fig = make_subplots(rows=1, cols=2, subplot_titles=("T² (System)", "SPE (Resid)"))
         fig.add_trace(go.Scatter(y=t2), row=1, col=1); fig.add_hline(y=chi2.ppf(0.99, 3), line_color='red', row=1, col=1)
         fig.add_trace(go.Scatter(y=spe), row=1, col=2)
         fig.update_layout(height=250, margin=dict(l=10,r=10,t=30,b=20), title="Multivariate SPC")
@@ -435,8 +428,9 @@ class Viz:
         fig = make_subplots(rows=1, cols=2, subplot_titles=("EWMA", "CUSUM"))
         fig.add_trace(go.Scatter(y=d, line=dict(color='gray'), name="Raw"), row=1, col=1)
         fig.add_trace(go.Scatter(y=ewma, line=dict(color='blue'), name="EWMA"), row=1, col=1)
+        # CUSUM simplified visualization
         fig.add_trace(go.Scatter(y=np.cumsum(d - np.mean(d)), name="CUSUM"), row=1, col=2)
-        fig.update_layout(height=250, margin=dict(l=10,r=10,t=30,b=20), title="Advanced Control")
+        fig.update_layout(height=250, margin=dict(l=10,r=10,t=30,b=20), title=f"Adv Control ({'Violations!' if violations else 'Stable'})")
         return fig
 
     @staticmethod
@@ -446,7 +440,7 @@ class Viz:
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=np.arange(60), y=df['MAP'].iloc[-60:], name="Hx", line=dict(color='black')))
         fig.add_trace(go.Scatter(x=np.arange(60,90), y=hw, name="ETS", line=dict(dash='dot', color='green')))
-        fig.update_layout(height=250, margin=dict(l=20,r=20,t=30,b=20), title="Advanced Forecasting (ETS)")
+        fig.update_layout(height=250, margin=dict(l=20,r=20,t=30,b=20), title="Advanced Forecasting (ETS)", xaxis_title="Steps", yaxis_title="MAP [mmHg]")
         return fig
 
     @staticmethod
@@ -456,7 +450,7 @@ class Viz:
         fig = go.Figure()
         fig.add_trace(go.Histogram(x=e, opacity=0.5, name="Baseline"))
         fig.add_trace(go.Histogram(x=l, opacity=0.5, name="Current"))
-        fig.update_layout(height=200, margin=dict(l=10,r=10,t=30,b=20), title=f"Dist Shift (W={d:.1f})", barmode='overlay')
+        fig.update_layout(height=200, margin=dict(l=10,r=10,t=30,b=20), title=f"Dist Shift (W={d:.1f})", barmode='overlay', xaxis_title="MAP [mmHg]", yaxis_title="Count")
         return fig
 
 # ==========================================
@@ -547,14 +541,14 @@ class App:
             
             z1, z2 = st.columns(2)
             z1.plotly_chart(Viz.forecast(df, p10, p50, p90, ix), use_container_width=True)
-            z1.markdown("<div class='clinical-hint'><b>Monte Carlo:</b> Stochastic MAP projection.</div>", unsafe_allow_html=True)
+            z1.markdown("<div class='clinical-hint'><b>Monte Carlo:</b> Stochastic MAP projection based on volatility.</div>", unsafe_allow_html=True)
             z2.plotly_chart(Viz.counterfactual(df, df_b, ix), use_container_width=True)
-            z2.markdown("<div class='clinical-hint'><b>Efficacy:</b> What if we hadn't treated?</div>", unsafe_allow_html=True)
+            z2.markdown("<div class='clinical-hint'><b>Efficacy:</b> What if we hadn't treated? Shows net benefit.</div>", unsafe_allow_html=True)
 
         with t_resp:
             c1, c2 = st.columns(2)
             c1.plotly_chart(Viz.vq_scatter(df, ix), use_container_width=True)
-            c1.markdown("<div class='clinical-hint'><b>V/Q:</b> Shunt vs Dead Space.</div>", unsafe_allow_html=True)
+            c1.markdown("<div class='clinical-hint'><b>V/Q:</b> Shunt (Hypoxia) vs Dead Space (Ventilation failure).</div>", unsafe_allow_html=True)
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True)
             fig.add_trace(go.Scatter(y=df['SpO2'], name="SpO2"), row=1, col=1)
             fig.add_trace(go.Scatter(y=df['PaCO2'], name="PaCO2"), row=2, col=1)
@@ -567,24 +561,32 @@ class App:
             c1, c2 = st.columns(2)
             with c1:
                 st.plotly_chart(Viz.bayes(probs, ix), use_container_width=True)
+                st.markdown("<div class='clinical-hint'><b>Bayesian Inference:</b> Probability of shock state based on priors.</div>", unsafe_allow_html=True)
                 st.info(f"RL Advisor: {sugg} ({conf}%)")
                 st.plotly_chart(Viz.chaos(df, src, ix), use_container_width=True)
-                st.markdown(f"<div class='clinical-hint'><b>Driver:</b> {src}. {reason}.</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='clinical-hint'><b>Driver:</b> {src}. {reason}. <br>Cigar=Health, Dot=Stress.</div>", unsafe_allow_html=True)
             with c2:
                 st.plotly_chart(Viz.spectral(df, ix), use_container_width=True)
+                st.markdown("<div class='clinical-hint'><b>Spectral HRV:</b> Sympathovagal balance (LF/HF ratio).</div>", unsafe_allow_html=True)
                 st.plotly_chart(Viz.wasserstein(df, ix), use_container_width=True)
+                st.markdown("<div class='clinical-hint'><b>Drift:</b> Quantifies fundamental distribution shift from baseline.</div>", unsafe_allow_html=True)
                 st.plotly_chart(Viz.adv_forecast(df, ix), use_container_width=True)
+                st.markdown("<div class='clinical-hint'><b>ETS:</b> Exponential Smoothing Forecast.</div>", unsafe_allow_html=True)
 
         with t_spc:
             st.plotly_chart(Viz.spc_charts(df, ix), use_container_width=True)
-            st.markdown("<div class='clinical-hint'><b>SPC:</b> X-Bar/R-Chart for stability.</div>", unsafe_allow_html=True)
+            st.markdown("<div class='clinical-hint'><b>Standard SPC:</b> X-Bar detects mean shifts. R-Chart detects variance.</div>", unsafe_allow_html=True)
             c1, c2 = st.columns(2)
             c1.plotly_chart(Viz.mspc(t2, spe, ix), use_container_width=True)
+            c1.markdown("<div class='clinical-hint'><b>Multivariate:</b> T2=System deviation. SPE=Residual error.</div>", unsafe_allow_html=True)
             c2.plotly_chart(Viz.adv_control(df, ix), use_container_width=True)
+            c2.markdown("<div class='clinical-hint'><b>Adv Control:</b> EWMA detects small shifts. CUSUM detects cumulative drift.</div>", unsafe_allow_html=True)
             
             c3, c4 = st.columns(2)
             c3.plotly_chart(Viz.method_comp(df, ix), use_container_width=True)
+            c3.markdown("<div class='clinical-hint'><b>Validation:</b> Compare Art Line vs Cuff.</div>", unsafe_allow_html=True)
             c4.plotly_chart(Viz.cpk_tol(df, ix), use_container_width=True)
+            c4.markdown("<div class='clinical-hint'><b>Capability:</b> Can patient maintain target MAP?</div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     app = App()
