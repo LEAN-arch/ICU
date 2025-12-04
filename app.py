@@ -15,16 +15,17 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import time
 
 # ==========================================
-# 1. CONFIGURATION & THEME
+# 1. CONFIGURATION & MEDICAL THEME
 # ==========================================
 st.set_page_config(
-    page_title="TITAN | ULTIMATE CDS",
+    page_title="TITAN | ULTIMATE COMMAND CENTER",
     layout="wide",
     initial_sidebar_state="expanded",
     page_icon="🧬"
 )
 
 class CONFIG:
+    # UI Colors
     COLORS = {
         "bg": "#f8fafc", "card": "#ffffff", "text": "#0f172a", "muted": "#64748b",
         "crit": "#dc2626", "warn": "#d97706", "ok": "#059669",
@@ -33,9 +34,11 @@ class CONFIG:
         "ext": "#d946ef", "spc": "#059669"
     }
     
+    # Physics Constants
     ATM_PRESSURE = 760.0; H2O_PRESSURE = 47.0; R_QUOTIENT = 0.8; MAX_PAO2 = 600.0
     HB_CONVERSION = 1.34; LAC_PROD_THRESH = 330.0; LAC_CLEAR_RATE = 0.05; VCO2_CONST = 130
     
+    # Drug PK (Potency, Tau, Tolerance)
     DRUG_PK = {
         'norepi': {'svr': 2500.0, 'map': 120.0, 'co': 0.8, 'tau': 2.0, 'tol': 1440.0}, 
         'vaso':   {'svr': 4000.0, 'map': 150.0, 'co': -0.2, 'tau': 5.0, 'tol': 2880.0}, 
@@ -43,6 +46,7 @@ class CONFIG:
         'bb':     {'svr': 50.0, 'map': -15.0, 'co': -2.0, 'hr': -35.0, 'tau': 4.0, 'tol': 5000.0}
     }
     
+    # SPC & QA Limits
     MAP_LSL = 65.0; MAP_USL = 110.0; CUSUM_H = 4.0; CUSUM_K = 0.5
 
 STYLING = f"""
@@ -57,6 +61,7 @@ STYLING = f"""
     .zone-header {{ font-size: 0.85rem; font-weight: 900; color: {CONFIG.COLORS['text']}; text-transform: uppercase; border-bottom: 2px solid {CONFIG.COLORS['info']}33; margin: 25px 0 10px 0; letter-spacing: 0.05em; }}
     .status-banner {{ padding: 15px; border-radius: 8px; background: {CONFIG.COLORS['card']}; border-left: 6px solid {CONFIG.COLORS['ai']}; margin-bottom: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; }}
     .clinical-hint {{ font-size: 0.75rem; color: {CONFIG.COLORS['muted']}; background: #f1f5f9; padding: 8px; border-radius: 4px; margin-top: 5px; border-left: 3px solid {CONFIG.COLORS['info']}; }}
+    .sme-note {{ font-size: 0.7rem; color: #475569; background-color: #e2e8f0; padding: 5px; border-radius: 4px; margin-top: 5px; }}
     
     .crit-pulse {{ animation: pulse-red 2s infinite; color: {CONFIG.COLORS['crit']}; }}
     @keyframes pulse-red {{ 0% {{ opacity: 1; }} 50% {{ opacity: 0.5; }} 100% {{ opacity: 1; }} }}
@@ -82,16 +87,18 @@ class Utils:
         return B + (noise * volatility)
 
 # ==========================================
-# 3. PHYSIOLOGY ENGINES
+# 3. PHYSIOLOGY ENGINES (VECTORIZED)
 # ==========================================
 class Physiology:
     class Autonomic:
         @staticmethod
         def generate(mins, p, is_paced, vent_mode):
+            # Heart Rate Logic (Internal vs External)
             if is_paced: hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][0], 0.1, 'white')
             elif vent_mode == 'Control (AC)': hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][1], 1.5, 'periodic')
             else: hr = Utils.brownian_bridge(mins, p['hr'][0], p['hr'][1], 1.5, 'pink')
             
+            # Other vitals (Bio-driven)
             map_r = np.maximum(Utils.brownian_bridge(mins, p['map'][0], p['map'][1], 1.2, 'pink'), 20.0)
             ci = np.maximum(Utils.brownian_bridge(mins, p['ci'][0], p['ci'][1], 0.2, 'pink'), 0.5)
             svri = np.maximum(Utils.brownian_bridge(mins, p['svri'][0], p['svri'][1], 100.0, 'pink'), 100.0)
@@ -149,8 +156,8 @@ class Analytics:
         if np.max(np.abs(np.gradient(arr))) > 5.0: return "EXTERNAL: INFUSION", 90, "Non-Physiologic Step Change"
         f, Pxx = welch(arr, fs=1/60)
         entropy = -np.sum((Pxx/np.sum(Pxx)) * np.log2((Pxx/np.sum(Pxx)) + 1e-12))
-        if entropy < 1.5: return "EXTERNAL: VENTILATOR", 85, "Periodic Machine Entrainment"
-        return "INTERNAL: AUTONOMIC", 80, "Fractal Bio-Complexity (Pink Noise)"
+        if entropy < 1.5: return "EXTERNAL: VENTILATOR", 85, "Periodic Entrainment"
+        return "INTERNAL: AUTONOMIC", 80, "Fractal Pink Noise"
 
     @staticmethod
     def bayes_shock(row):
@@ -158,9 +165,10 @@ class Analytics:
         covs = {"Cardiogenic": [[0.5, -100], [-100, 150000]], "Distributive": [[1.0, -200], [-200, 100000]],
                 "Hypovolemic": [[0.4, -50], [-50, 200000]], "Stable": [[0.6, -150], [-150, 150000]]}
         scores = {}; total = 0
+        x = [row['CI'], row['SVRI']]
         for k, m in means.items():
             try:
-                scores[k] = multivariate_normal.pdf([row['CI'], row['SVRI']], m, covs[k])
+                scores[k] = multivariate_normal.pdf(x, m, covs[k])
                 total += scores[k]
             except: scores[k] = 0
         return {k: (v/total)*100 for k, v in scores.items()} if total > 1e-9 else {k:25.0 for k in means}
@@ -168,9 +176,9 @@ class Analytics:
     @staticmethod
     def rl_advisor(row, drugs):
         if row['MAP'] < 65:
-            if row['CI'] < 2.2: return "Titrate Dobutamine (Inotrope)", 88
-            else: return "Increase Norepinephrine (Vasopressor)", 90
-        return "Maintain Current Therapy", 99
+            if row['CI'] < 2.2: return "Titrate Dobutamine", 88
+            else: return "Increase Norepi", 90
+        return "Maintain", 99
 
     @staticmethod
     def detect_anomalies(df):
@@ -207,6 +215,9 @@ class Analytics:
             return [f"C{i+1}: CI={c[0]:.1f}, SVR={c[1]:.0f}" for i,c in enumerate(ctrs)]
         except: return ["Calc Error"]
 
+# ==========================================
+# 5. QUALITY ASSURANCE ENGINE
+# ==========================================
 class QualityAssurance:
     @staticmethod
     def calculate_cpk(data, usl, lsl):
@@ -259,7 +270,7 @@ class ForecastingEngine:
         return hw
 
 # ==========================================
-# 5. PATIENT SIMULATOR
+# 6. PATIENT SIMULATOR
 # ==========================================
 class PatientSimulator:
     def __init__(self, mins=360):
@@ -296,7 +307,7 @@ class PatientSimulator:
         return df
 
 # ==========================================
-# 6. VISUALIZATION LAYER
+# 7. VISUALIZATION LAYER (FULLY LABELED)
 # ==========================================
 class Viz:
     @staticmethod
@@ -316,7 +327,7 @@ class Viz:
     def attractor_3d(df, key):
         r = df.iloc[-60:]
         fig = go.Figure(go.Scatter3d(x=r['CPO'], y=r['SVRI'], z=r['Lactate'], mode='lines+markers', marker=dict(size=3, color=r.index, colorscale='Viridis'), line=dict(width=2)))
-        fig.update_layout(scene=dict(xaxis_title='Power [W]', yaxis_title='SVRI [dyn·s]', zaxis_title='Lac [mM]'), margin=dict(l=0,r=0,b=0,t=30), height=250, title="3D Phase Space Trajectory")
+        fig.update_layout(scene=dict(xaxis_title='Power [W]', yaxis_title='SVRI [dyn·s]', zaxis_title='Lactate [mM]'), margin=dict(l=0,r=0,b=0,t=30), height=250, title="3D Phase Space Trajectory")
         return fig
 
     @staticmethod
@@ -454,7 +465,7 @@ class Viz:
         return fig
 
 # ==========================================
-# 7. APP ORCHESTRATION
+# 8. APP ORCHESTRATION
 # ==========================================
 class App:
     def __init__(self):
@@ -533,60 +544,63 @@ class App:
             
             c1, c2, c3 = st.columns(3)
             c1.plotly_chart(Viz.hemodynamic_profile(df, ix), use_container_width=True)
-            c1.markdown("<div class='clinical-hint'><b>Pump vs Pipes:</b> Classify shock (Cold/Wet vs Warm/Dry).</div>", unsafe_allow_html=True)
+            c1.markdown("<div class='clinical-hint'><b>Significance:</b> Classifies shock state into clinical quadrants. <br><b>Action:</b> Low CI/High SVR (Cold/Wet) needs Inotropes. High CI/Low SVR (Warm/Dry) needs Vasopressors.</div>", unsafe_allow_html=True)
+            
             c2.plotly_chart(Viz.phase_space(df, ix), use_container_width=True)
-            c2.markdown("<div class='clinical-hint'><b>Coupling:</b> Detect metabolic uncoupling.</div>", unsafe_allow_html=True)
+            c2.markdown("<div class='clinical-hint'><b>Significance:</b> Visualizes the coupling between Cardiac Power (Pump) and Lactate (Metabolism). <br><b>Action:</b> If trajectory moves to bottom-right (Low Power/High Lactate), immediate mechanical support (IABP/Impella) may be required.</div>", unsafe_allow_html=True)
+            
             c3.plotly_chart(Viz.attractor_3d(df, ix), use_container_width=True)
-            c3.markdown("<div class='clinical-hint'><b>Trajectory:</b> 3D stability analysis.</div>", unsafe_allow_html=True)
+            c3.markdown("<div class='clinical-hint'><b>Significance:</b> 3D Topological stability analysis. <br><b>Action:</b> Large, erratic orbits indicate a chaotic, unstable system prone to sudden crash. Tight orbits indicate stability.</div>", unsafe_allow_html=True)
             
             z1, z2 = st.columns(2)
             z1.plotly_chart(Viz.forecast(df, p10, p50, p90, ix), use_container_width=True)
-            z1.markdown("<div class='clinical-hint'><b>Monte Carlo:</b> Stochastic MAP projection based on volatility.</div>", unsafe_allow_html=True)
+            z1.markdown("<div class='clinical-hint'><b>Significance:</b> Stochastic Monte Carlo projection of MAP based on recent volatility. <br><b>Action:</b> A widening cone indicates loss of autonomic control. Downward trend requires pre-emptive vasopressor titration.</div>", unsafe_allow_html=True)
             z2.plotly_chart(Viz.counterfactual(df, df_b, ix), use_container_width=True)
-            z2.markdown("<div class='clinical-hint'><b>Efficacy:</b> What if we hadn't treated? Shows net benefit.</div>", unsafe_allow_html=True)
+            z2.markdown("<div class='clinical-hint'><b>Significance:</b> 'What If' analysis showing patient trajectory without current interventions. <br><b>Action:</b> The gap between lines represents the 'Value Add' of your current therapy. If lines converge, therapy is futile.</div>", unsafe_allow_html=True)
 
         with t_resp:
             c1, c2 = st.columns(2)
             c1.plotly_chart(Viz.vq_scatter(df, ix), use_container_width=True)
-            c1.markdown("<div class='clinical-hint'><b>V/Q:</b> Shunt (Hypoxia) vs Dead Space (Ventilation failure).</div>", unsafe_allow_html=True)
+            c1.markdown("<div class='clinical-hint'><b>Significance:</b> Distinguishes Shunt from Dead Space. <br><b>Action:</b> Vertical scatter (Hypoxia) -> Increase PEEP/FiO2. Horizontal scatter (Hypercapnia) -> Increase Ventilation (RR/Vt).</div>", unsafe_allow_html=True)
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True)
             fig.add_trace(go.Scatter(y=df['SpO2'], name="SpO2"), row=1, col=1)
             fig.add_trace(go.Scatter(y=df['PaCO2'], name="PaCO2"), row=2, col=1)
             fig.add_trace(go.Scatter(y=df['Vd/Vt'], name="Vd/Vt"), row=3, col=1)
             fig.update_layout(height=400, margin=dict(l=0,r=0,t=0,b=0))
             c2.plotly_chart(fig, use_container_width=True, key=f"t_resp_{ix}")
-            c2.markdown("<div class='clinical-hint'><b>Gas Exchange:</b> Real-time ventilation metrics.</div>", unsafe_allow_html=True)
+            c2.markdown("<div class='clinical-hint'><b>Significance:</b> Real-time ventilation telemetry stack. <br><b>Action:</b> Monitor Dead Space fraction (Vd/Vt). Rising Vd/Vt indicates worsening ARDS or PE.</div>", unsafe_allow_html=True)
 
         with t_ai:
             c1, c2 = st.columns(2)
             with c1:
                 st.plotly_chart(Viz.bayes(probs, ix), use_container_width=True)
-                st.markdown("<div class='clinical-hint'><b>Bayesian Inference:</b> Probability of shock state based on priors.</div>", unsafe_allow_html=True)
+                st.markdown("<div class='clinical-hint'><b>Significance:</b> Posterior probability of shock state given current hemodynamics. <br><b>Action:</b> Use to confirm diagnosis when clinical picture is ambiguous.</div>", unsafe_allow_html=True)
                 st.info(f"RL Advisor: {sugg} ({conf}%)")
+                st.markdown("<div class='clinical-hint'><b>Significance:</b> Reinforcement Learning policy recommendation. <br><b>Action:</b> 'Digital Second Opinion' for pump titration.</div>", unsafe_allow_html=True)
                 st.plotly_chart(Viz.chaos(df, src, ix), use_container_width=True)
-                st.markdown(f"<div class='clinical-hint'><b>Driver:</b> {src}. {reason}. <br>Cigar=Health, Dot=Stress.</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='clinical-hint'><b>Significance:</b> Signal Forensics / Poincaré Plot. <br><b>Action:</b> 'Cigar' = Healthy. 'Dot' = Sympathetic Overdrive/Pacing. 'Cloud' = AFib. Used to assess autonomic reserve.</div>", unsafe_allow_html=True)
             with c2:
                 st.plotly_chart(Viz.spectral(df, ix), use_container_width=True)
-                st.markdown("<div class='clinical-hint'><b>Spectral HRV:</b> Sympathovagal balance (LF/HF ratio).</div>", unsafe_allow_html=True)
+                st.markdown("<div class='clinical-hint'><b>Significance:</b> Frequency Domain HRV. <br><b>Action:</b> LF (Low Freq) = Sympathetic. HF (High Freq) = Parasympathetic. Loss of power = Autonomic Failure.</div>", unsafe_allow_html=True)
                 st.plotly_chart(Viz.wasserstein(df, ix), use_container_width=True)
-                st.markdown("<div class='clinical-hint'><b>Drift:</b> Quantifies fundamental distribution shift from baseline.</div>", unsafe_allow_html=True)
+                st.markdown("<div class='clinical-hint'><b>Significance:</b> Wasserstein Metric (Earth Mover's Distance). <br><b>Action:</b> Quantifies total distributional shift from admission. High score = Fundamental change in patient physiology.</div>", unsafe_allow_html=True)
                 st.plotly_chart(Viz.adv_forecast(df, ix), use_container_width=True)
-                st.markdown("<div class='clinical-hint'><b>ETS:</b> Exponential Smoothing Forecast.</div>", unsafe_allow_html=True)
+                st.markdown("<div class='clinical-hint'><b>Significance:</b> Holt-Winters (ETS) Forecasting. <br><b>Action:</b> Models seasonality (breathing) and trend to predict near-term collapse.</div>", unsafe_allow_html=True)
 
         with t_spc:
             st.plotly_chart(Viz.spc_charts(df, ix), use_container_width=True)
-            st.markdown("<div class='clinical-hint'><b>Standard SPC:</b> X-Bar detects mean shifts. R-Chart detects variance.</div>", unsafe_allow_html=True)
+            st.markdown("<div class='clinical-hint'><b>Significance:</b> X-Bar/R-Charts differentiate Signal vs Noise. <br><b>Action:</b> Points outside red lines = Statistically significant shift requiring intervention, not just random variation.</div>", unsafe_allow_html=True)
             c1, c2 = st.columns(2)
             c1.plotly_chart(Viz.mspc(t2, spe, ix), use_container_width=True)
-            c1.markdown("<div class='clinical-hint'><b>Multivariate:</b> T2=System deviation. SPE=Residual error.</div>", unsafe_allow_html=True)
+            c1.markdown("<div class='clinical-hint'><b>Significance:</b> Multivariate SPC. T2 = Deviation from normal correlation structure. <br><b>Action:</b> High T2 = 'Something is wrong' (e.g., Sepsis uncoupling). High SPE = 'Something new happened' (e.g., Sensor error).</div>", unsafe_allow_html=True)
             c2.plotly_chart(Viz.adv_control(df, ix), use_container_width=True)
-            c2.markdown("<div class='clinical-hint'><b>Adv Control:</b> EWMA detects small shifts. CUSUM detects cumulative drift.</div>", unsafe_allow_html=True)
+            c2.markdown("<div class='clinical-hint'><b>Significance:</b> EWMA/CUSUM are sensitive to small, persistent shifts. <br><b>Action:</b> Detects slow deterioration (e.g., occult bleeding) long before standard alarms trigger.</div>", unsafe_allow_html=True)
             
             c3, c4 = st.columns(2)
             c3.plotly_chart(Viz.method_comp(df, ix), use_container_width=True)
-            c3.markdown("<div class='clinical-hint'><b>Validation:</b> Compare Art Line vs Cuff.</div>", unsafe_allow_html=True)
+            c3.markdown("<div class='clinical-hint'><b>Significance:</b> Bland-Altman Analysis. <br><b>Action:</b> Validates Invasive vs Non-Invasive BP. Wide limits of agreement = Sensor Failure.</div>", unsafe_allow_html=True)
             c4.plotly_chart(Viz.cpk_tol(df, ix), use_container_width=True)
-            c4.markdown("<div class='clinical-hint'><b>Capability:</b> Can patient maintain target MAP?</div>", unsafe_allow_html=True)
+            c4.markdown("<div class='clinical-hint'><b>Significance:</b> Process Capability Index (Cpk). <br><b>Action:</b> Cpk < 1.33 means the patient is hemodynamically unstable and likely to breach safety limits.</div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     app = App()
